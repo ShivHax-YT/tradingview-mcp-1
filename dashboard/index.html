@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MNQ Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d0d0d;
+    --bg2:      #161616;
+    --bg3:      #1e1e1e;
+    --border:   #2a2a2a;
+    --text:     #e0e0e0;
+    --muted:    #555;
+    --green:    #22c55e;
+    --red:      #ef4444;
+    --yellow:   #f59e0b;
+    --blue:     #3b82f6;
+    --mono:     'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    --sans:     -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── TOP BAR ───────────────────────────────────────────── */
+  #topbar {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 10px 20px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  #symbol-label {
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 1px;
+  }
+
+  #symbol-select {
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--sans);
+    cursor: pointer;
+    outline: none;
+  }
+  #symbol-select:hover { border-color: #444; }
+  #symbol-select option { background: var(--bg2); }
+
+  #live-price {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: var(--mono);
+    color: #fff;
+    min-width: 110px;
+    transition: color 0.3s;
+  }
+  #live-price.up   { color: var(--green); }
+  #live-price.down { color: var(--red);   }
+
+  #session-badge {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  #pst-clock {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  #mode-badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  #mode-badge.swing { background: #1e3a5f; color: var(--blue); }
+  #mode-badge.scalp { background: #3a1f00; color: var(--yellow); }
+
+  #conn-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  #conn-dot.connected { background: var(--green); }
+
+  /* ── MAIN ──────────────────────────────────────────────── */
+  #main {
+    flex: 1;
+    display: flex;
+    gap: 0;
+    overflow: hidden;
+  }
+
+  /* ── STATE PANEL ────────────────────────────────────────── */
+  #state-panel {
+    width: 340px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    padding: 24px 20px;
+    gap: 20px;
+    overflow-y: auto;
+  }
+
+  #state-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .dot {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .dot-hunting {
+    background: var(--muted);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .dot-armed {
+    background: var(--yellow);
+    box-shadow: 0 0 8px var(--yellow);
+  }
+  .dot-live-long {
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    animation: flash 0.8s ease-in-out infinite;
+  }
+  .dot-live-short {
+    background: var(--red);
+    box-shadow: 0 0 10px var(--red);
+    animation: flash 0.8s ease-in-out infinite;
+  }
+  .dot-stopped {
+    background: var(--red);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1;   transform: scale(1);    }
+    50%      { opacity: 0.4; transform: scale(0.75); }
+  }
+  @keyframes flash {
+    0%, 100% { opacity: 1;   }
+    50%      { opacity: 0.2; }
+  }
+
+  #state-label {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+  .label-hunting { color: var(--muted); }
+  .label-armed   { color: var(--yellow); }
+  .label-live    { color: var(--green);  }
+  .label-live.short { color: var(--red); }
+  .label-stopped { color: var(--red); }
+
+  #state-sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* ── NEAR LEVEL ALERT ───────────────────────────────────── */
+  #near-level-bar {
+    display: none;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid var(--yellow);
+    border-radius: 4px;
+    padding: 8px 12px;
+    color: var(--yellow);
+    font-size: 12px;
+    font-family: var(--mono);
+    line-height: 1.5;
+    animation: nearPulse 1.6s ease-in-out infinite;
+  }
+  #near-level-bar.active { display: block; }
+  @keyframes nearPulse {
+    0%, 100% { border-color: var(--yellow); }
+    50%      { border-color: rgba(245,158,11,0.3); }
+  }
+
+  /* ── SESSION LEVELS PANEL ───────────────────────────────── */
+  #session-levels {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+
+  .panel-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .lvl-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-family: var(--mono);
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(42,42,42,0.5);
+  }
+  .lvl-row:last-child { border-bottom: none; }
+
+  .lvl-name { color: var(--muted); min-width: 55px; }
+  .lvl-val  { color: var(--text); }
+
+  #session-loading-msg {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+    text-align: center;
+    padding: 4px 0;
+    display: none;
+  }
+  #session-loading-msg.active { display: block; }
+
+  /* ── SIGNAL CARD ─────────────────────────────────────────── */
+  #signal-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #signal-card.visible { display: flex; }
+
+  .sig-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+  .sig-label { color: var(--muted); }
+  .sig-val   { font-family: var(--mono); font-weight: 600; }
+  .sig-val.zone   { color: #fff; }
+  .sig-val.stop   { color: var(--red); }
+  .sig-val.tp     { color: var(--green); }
+  .sig-val.rr     { color: var(--yellow); }
+  .sig-val.pnl-pos { color: var(--green); }
+  .sig-val.pnl-neg { color: var(--red); }
+  .sig-val.entry  { color: var(--blue); }
+
+  .sig-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2px 0;
+  }
+
+  /* ── ZONE BAR ───────────────────────────────────────────── */
+  #zone-bar-wrap {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #zone-bar-wrap.visible { display: flex; }
+
+  #zone-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+
+  #zone-bar-track {
+    position: relative;
+    height: 20px;
+    background: var(--bg3);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+
+  #zone-fill {
+    position: absolute;
+    top: 0; bottom: 0;
+    background: rgba(245, 158, 11, 0.25);
+    border-left:  2px solid var(--yellow);
+    border-right: 2px solid var(--yellow);
+    transition: left 0.3s, width 0.3s;
+  }
+
+  #price-marker {
+    position: absolute;
+    top: 2px; bottom: 2px;
+    width: 3px;
+    background: #fff;
+    border-radius: 2px;
+    transition: left 0.3s;
+  }
+
+  #zone-dist-text {
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    font-family: var(--mono);
+  }
+
+  /* ── RIGHT SIDE ─────────────────────────────────────────── */
+  #right-side {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── CLAUDE BOX ─────────────────────────────────────────── */
+  #claude-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  #claude-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+  }
+
+  #claude-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  #scan-spinner {
+    display: none;
+    width: 10px; height: 10px;
+    border: 2px solid var(--border);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  #scan-spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #scan-label {
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  #claude-output {
+    flex: 1;
+    overflow-y: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: #888;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 0;
+  }
+
+  /* ── SIGNAL LOG ─────────────────────────────────────────── */
+  #log-wrap {
+    height: 140px;
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  #log-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  #log-entries {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    overflow-y: auto;
+    max-height: 96px;
+  }
+
+  .log-entry {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+    align-items: center;
+  }
+
+  .log-time   { color: #3a3a3a; min-width: 58px; }
+  .log-dir    { font-weight: 700; min-width: 36px; }
+  .log-dir.long  { color: var(--green); }
+  .log-dir.short { color: var(--red); }
+  .log-dir.wait  { color: var(--muted); }
+  .log-result { }
+  .log-result.ARMED   { color: var(--yellow); }
+  .log-result.LIVE    { color: var(--green); }
+  .log-result.MISSED  { color: var(--red); }
+  .log-result.INVALID { color: var(--red); }
+  .log-result.WAIT     { color: var(--muted); }
+  .log-result.SCANNING { color: var(--yellow); animation: scanpulse 1.4s ease-in-out infinite; }
+  .log-rr { color: #3a3a3a; }
+
+  /* ── HEARTBEAT BAR ──────────────────────────────────────── */
+  #heartbeat-bar {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+    padding-top: 4px;
+    margin-top: auto;
+    min-height: 16px;
+  }
+
+  /* ── BOTTOM BUTTONS ─────────────────────────────────────── */
+  #btn-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+  }
+
+  button {
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    font-family: var(--sans);
+  }
+  button:hover { background: #2a2a2a; border-color: #444; }
+  button:active { transform: scale(0.97); }
+
+  button.active-mode { background: #1e3a5f; border-color: var(--blue); color: #fff; }
+  #btn-scalp.active-mode { background: #3a1f00; border-color: var(--yellow); color: var(--yellow); }
+
+  #btn-reset      { margin-left: auto; border-color: #3a1a1a; }
+  #btn-reset:hover { background: #2a1010; border-color: var(--red); color: var(--red); }
+
+  #btn-force { border-color: #1a3a1a; }
+  #btn-force:hover { background: #102010; border-color: var(--green); color: var(--green); }
+
+  #btn-stop { border-color: #3a1a1a; }
+  #btn-stop:hover { background: #2a1010; border-color: var(--red); color: var(--red); }
+  #btn-stop.running { background: #2a1010; border-color: var(--red); color: var(--red); }
+
+  /* ── SCAN STATUS BAR ───────────────────────────────────── */
+  #scan-status-bar {
+    display: none;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 4px;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+  }
+  #scan-status-bar.scanning {
+    display: block;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    animation: scanpulse 1.4s ease-in-out infinite;
+  }
+  #scan-status-bar.done {
+    display: block;
+    background: rgba(34, 197, 94, 0.08);
+    border: 1px solid var(--green);
+    color: var(--green);
+  }
+  @keyframes scanpulse {
+    0%, 100% { opacity: 1;   }
+    50%       { opacity: 0.4; }
+  }
+
+  /* ── ZONE STALE WARNING ─────────────────────────────────── */
+  #zone-stale-warn {
+    display: none;
+    font-size: 11px;
+    font-family: var(--mono);
+    padding: 5px 8px;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 1.5;
+  }
+  #zone-stale-warn.warn-yellow {
+    display: block;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+  }
+  #zone-stale-warn.warn-red {
+    display: block;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid var(--red);
+    color: var(--red);
+  }
+
+  /* ── TOAST ──────────────────────────────────────────────── */
+  #toast {
+    position: fixed;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e1e1e;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-size: 12px;
+    color: var(--text);
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    z-index: 100;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div id="conn-dot"></div>
+  <span id="symbol-label">MNQ1!</span>
+  <select id="symbol-select" onchange="changeSymbol(this.value)">
+    <option value="MNQ1!" selected>MNQ1!</option>
+    <option value="BINANCE:BTCUSDT">BTCUSDT</option>
+    <option value="BINANCE:ETHUSDT">ETHUSDT</option>
+    <option value="XAUUSD">XAUUSD</option>
+  </select>
+  <span id="live-price">—</span>
+  <span id="session-badge">—</span>
+  <span id="mode-badge" class="swing">SWING</span>
+  <span id="pst-clock">—</span>
+</div>
+
+<!-- MAIN LAYOUT -->
+<div id="main">
+
+  <!-- LEFT: STATE PANEL -->
+  <div id="state-panel">
+
+    <div id="state-indicator">
+      <div class="dot dot-hunting" id="state-dot"></div>
+      <div>
+        <div id="state-label" class="label-hunting">HUNTING</div>
+        <div id="state-sub">Scanning market…</div>
+      </div>
+    </div>
+
+    <!-- NEAR LEVEL ALERT -->
+    <div id="near-level-bar">
+      <span id="near-level-text"></span>
+    </div>
+
+    <!-- SIGNAL INFO CARD -->
+    <div id="signal-card">
+      <div class="sig-row">
+        <span class="sig-label">Direction</span>
+        <span class="sig-val zone" id="sig-dir">—</span>
+      </div>
+      <div class="sig-row">
+        <span class="sig-label">Entry zone</span>
+        <span class="sig-val zone" id="sig-zone">—</span>
+      </div>
+      <div class="sig-row">
+        <span class="sig-label">Stop</span>
+        <span class="sig-val stop" id="sig-stop">—</span>
+      </div>
+      <div class="sig-row">
+        <span class="sig-label">TP1</span>
+        <span class="sig-val tp" id="sig-tp1">—</span>
+      </div>
+      <div class="sig-row">
+        <span class="sig-label">TP2</span>
+        <span class="sig-val tp" id="sig-tp2">—</span>
+      </div>
+      <div class="sig-row">
+        <span class="sig-label">R:R</span>
+        <span class="sig-val rr" id="sig-rr">—</span>
+      </div>
+      <hr class="sig-divider" id="live-divider" style="display:none">
+      <!-- live-only rows -->
+      <div class="sig-row" id="row-entry" style="display:none">
+        <span class="sig-label">Entry</span>
+        <span class="sig-val entry" id="sig-entry">—</span>
+      </div>
+      <div class="sig-row" id="row-cur" style="display:none">
+        <span class="sig-label">Current</span>
+        <span class="sig-val" id="sig-cur">—</span>
+      </div>
+      <div class="sig-row" id="row-pnl" style="display:none">
+        <span class="sig-label">P&amp;L (pts)</span>
+        <span class="sig-val" id="sig-pnl">—</span>
+      </div>
+      <div class="sig-row" id="row-d1" style="display:none">
+        <span class="sig-label">Dist TP1</span>
+        <span class="sig-val" id="sig-d1">—</span>
+      </div>
+      <div class="sig-row" id="row-d2" style="display:none">
+        <span class="sig-label">Dist TP2</span>
+        <span class="sig-val" id="sig-d2">—</span>
+      </div>
+    </div>
+
+    <!-- ZONE PROXIMITY BAR (ARMED only) -->
+    <div id="zone-bar-wrap">
+      <div id="zone-bar-labels">
+        <span id="bar-stop-lbl">STOP</span>
+        <span id="bar-zone-lbl">ZONE</span>
+        <span id="bar-tp1-lbl">TP1</span>
+      </div>
+      <div id="zone-bar-track">
+        <div id="zone-fill"></div>
+        <div id="price-marker"></div>
+      </div>
+      <div id="zone-dist-text">—</div>
+    </div>
+
+    <!-- ZONE STALE WARNING (ARMED only) -->
+    <div id="zone-stale-warn"></div>
+
+    <!-- HEARTBEAT / NEAREST LEVEL -->
+    <div id="heartbeat-bar"></div>
+
+    <!-- SESSION LEVELS PANEL -->
+    <div id="session-levels">
+      <div class="panel-title">Session Levels</div>
+      <div id="session-loading-msg">⟳ Loading...</div>
+      <div class="lvl-row">
+        <span class="lvl-name">Asia</span>
+        <span class="lvl-val" id="lvl-asia">—</span>
+      </div>
+      <div class="lvl-row">
+        <span class="lvl-name">London</span>
+        <span class="lvl-val" id="lvl-london">—</span>
+      </div>
+      <div class="lvl-row">
+        <span class="lvl-name">PD</span>
+        <span class="lvl-val" id="lvl-pd">—</span>
+      </div>
+      <div class="lvl-row">
+        <span class="lvl-name">NY</span>
+        <span class="lvl-val" id="lvl-ny">—</span>
+      </div>
+    </div>
+
+  </div><!-- /state-panel -->
+
+  <!-- RIGHT SIDE -->
+  <div id="right-side">
+
+    <!-- CLAUDE OUTPUT -->
+    <div id="claude-wrap">
+      <div id="claude-header">
+        <span id="claude-title">Claude Analysis</span>
+        <div id="scan-spinner"></div>
+        <span id="scan-label"></span>
+      </div>
+      <div id="scan-status-bar"></div>
+      <div id="claude-output"></div>
+    </div>
+
+    <!-- SIGNAL LOG -->
+    <div id="log-wrap">
+      <div id="log-title">Signal Log</div>
+      <div id="log-entries"></div>
+    </div>
+
+    <!-- BUTTONS -->
+    <div id="btn-bar">
+      <button id="btn-swing" class="active-mode" onclick="setMode('swing')">SWING</button>
+      <button id="btn-scalp" onclick="setMode('scalp')">SCALP</button>
+      <button id="btn-force" onclick="forceScan()">Force Scan</button>
+      <button id="btn-stop" onclick="doStopStart()">STOP</button>
+      <button id="btn-reset" onclick="doReset()">Reset</button>
+    </div>
+
+  </div><!-- /right-side -->
+</div><!-- /main -->
+
+<div id="toast"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let curState    = 'HUNTING';
+let curSignal   = null;
+let curMode     = 'swing';
+let botRunning  = true;
+let prevPrice   = null;
+let es          = null;
+let curSymbol   = 'MNQ1!';
+
+// ── Elements ──────────────────────────────────────────────────────────────────
+const $  = (id) => document.getElementById(id);
+
+const elPrice     = $('live-price');
+const elSession   = $('session-badge');
+const elClock     = $('pst-clock');
+const elModeBadge = $('mode-badge');
+const elConnDot   = $('conn-dot');
+
+const elDot       = $('state-dot');
+const elLabel     = $('state-label');
+const elSub       = $('state-sub');
+const elSigCard   = $('signal-card');
+
+const elClaudeOut = $('claude-output');
+const elSpinner   = $('scan-spinner');
+const elScanLbl   = $('scan-label');
+const elLogWrap   = $('log-entries');
+
+const elZoneWrap      = $('zone-bar-wrap');
+const elZoneFill      = $('zone-fill');
+const elPriceMkr      = $('price-marker');
+const elDistText      = $('zone-dist-text');
+const elScanBar       = $('scan-status-bar');
+const elZoneStaleWarn = $('zone-stale-warn');
+const elNearBar       = $('near-level-bar');
+const elNearText      = $('near-level-text');
+const elBtnStop       = $('btn-stop');
+
+// ── Clock & session ───────────────────────────────────────────────────────────
+function getSession(h, m) {
+  const t = h * 60 + m;
+  if (t >= 390 && t < 480)   return 'Pre-Market';   // 6:30–8 AM PT
+  if (t >= 480 && t < 780)   return 'NYSE';          // 8 AM–1 PM PT
+  if (t >= 780 && t < 870)   return 'After-Hours';  // 1–2:30 PM PT
+  if (t >= 870 && t < 1080)  return 'Overnight';    // 2:30–6 PM PT
+  if (t >= 1080)             return 'Asia';          // 6 PM+ PT
+  return 'London';                                    // midnight–6:30 AM PT
+}
+
+function updateClock() {
+  const now = new Date();
+  const ptStr = now.toLocaleTimeString('en-US', {
+    timeZone: 'America/Los_Angeles',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  elClock.textContent = ptStr + ' PT';
+
+  const parts = ptStr.split(':').map(Number);
+  elSession.textContent = getSession(parts[0], parts[1]);
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Audio beep ────────────────────────────────────────────────────────────────
+function playBeep(isLong) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const freqs = isLong ? [880, 1100] : [440, 330];
+
+    freqs.forEach((freq, i) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const t = ctx.currentTime + i * 0.35;
+      gain.gain.setValueAtTime(0.35, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+      osc.start(t);
+      osc.stop(t + 0.3);
+    });
+  } catch {}
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let toastTimer    = null;
+let scanDoneTimer = null;
+function toast(msg, color) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.style.borderColor = color || '#2a2a2a';
+  el.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Session levels panel ──────────────────────────────────────────────────────
+function renderSessionLevels(levels) {
+  $('session-loading-msg').classList.remove('active');
+  const fmt = (h, l) => {
+    const hStr = (h !== null && h !== undefined) ? h.toFixed(2) : '—';
+    const lStr = (l !== null && l !== undefined) ? l.toFixed(2) : '—';
+    return `H ${hStr} / L ${lStr}`;
+  };
+  $('lvl-asia').textContent   = fmt(levels.asiaHigh,   levels.asiaLow);
+  $('lvl-london').textContent = fmt(levels.londonHigh, levels.londonLow);
+  $('lvl-pd').textContent     = fmt(levels.pdHigh,     levels.pdLow);
+  $('lvl-ny').textContent     = fmt(levels.nyHigh,     levels.nyLow);
+}
+
+// ── Near level alert ──────────────────────────────────────────────────────────
+function showNearLevel(name, levelPrice, dist) {
+  const distStr = typeof dist === 'number' ? dist.toFixed(0) : '?';
+  elNearText.textContent = `⚡ Approaching ${name} at ${levelPrice} — ${distStr} pts away`;
+  elNearBar.classList.add('active');
+}
+
+function hideNearLevel() {
+  elNearBar.classList.remove('active');
+}
+
+// ── Stop button state ─────────────────────────────────────────────────────────
+function setBotRunning(running) {
+  botRunning = running;
+  if (running) {
+    elBtnStop.textContent = 'STOP';
+    elBtnStop.classList.remove('running');
+  } else {
+    elBtnStop.textContent = 'START';
+    elBtnStop.classList.add('running');
+  }
+}
+
+// ── UI: state rendering ───────────────────────────────────────────────────────
+function renderHunting(reason) {
+  elDot.className     = 'dot dot-hunting';
+  elDot.style.background = '';
+  elLabel.className   = 'label-hunting';
+  elLabel.style.color = '';
+  elLabel.textContent = 'HUNTING';
+  elSub.textContent   = reason ? `↩ ${reason} — scanning…` : 'Scanning market…';
+  elSigCard.classList.remove('visible');
+  elZoneWrap.classList.remove('visible');
+  elZoneStaleWarn.className = '';
+  elZoneStaleWarn.textContent = '';
+  hideRows(['live-divider','row-entry','row-cur','row-pnl','row-d1','row-d2']);
+}
+
+function renderArmed(signal) {
+  elDot.className     = 'dot dot-armed';
+  elDot.style.background = '';
+  elLabel.className   = 'label-armed';
+  elLabel.style.color = '';
+  elLabel.textContent = 'ARMED';
+  elSub.textContent   = 'Waiting for entry zone…';
+  elSigCard.classList.add('visible');
+  elZoneWrap.classList.add('visible');
+  hideRows(['live-divider','row-entry','row-cur','row-pnl','row-d1','row-d2']);
+  fillSignalCard(signal);
+}
+
+function renderLive(signal, entry) {
+  const isLong = signal.direction === 'LONG';
+  elDot.className     = `dot ${isLong ? 'dot-live-long' : 'dot-live-short'}`;
+  elDot.style.background = '';
+  elLabel.className   = `label-live${isLong ? '' : ' short'}`;
+  elLabel.style.color = '';
+  elLabel.textContent = isLong ? 'LONG ALERT' : 'SHORT ALERT';
+  elSub.textContent   = `Entered @ ${entry}`;
+  elSigCard.classList.add('visible');
+  elZoneWrap.classList.remove('visible');
+  showRows(['live-divider','row-entry','row-cur','row-pnl','row-d1','row-d2']);
+  fillSignalCard(signal);
+  $('sig-entry').textContent = entry.toFixed(2);
+}
+
+function renderStopped() {
+  elDot.className        = 'dot dot-stopped';
+  elDot.style.background = 'var(--red)';
+  elLabel.className      = 'label-stopped';
+  elLabel.style.color    = 'var(--red)';
+  elLabel.textContent    = 'BOT STOPPED';
+  elSub.textContent      = 'Click START to resume';
+  elSigCard.classList.remove('visible');
+  elZoneWrap.classList.remove('visible');
+  hideNearLevel();
+}
+
+function hideRows(ids) { ids.forEach(id => $(id) && ($(id).style.display = 'none')); }
+function showRows(ids) { ids.forEach(id => $(id) && ($(id).style.display = 'flex')); }
+
+function fillSignalCard(s) {
+  $('sig-dir').textContent   = s.direction;
+  $('sig-dir').style.color   = s.direction === 'LONG' ? 'var(--green)' : 'var(--red)';
+  $('sig-zone').textContent  = `${s.zone[0]} – ${s.zone[1]}`;
+  $('sig-stop').textContent  = s.stop.toFixed(2);
+  $('sig-tp1').textContent   = s.tp1.toFixed(2);
+  $('sig-tp2').textContent   = s.tp2.toFixed(2);
+  $('sig-rr').textContent    = `${s.rr}R`;
+}
+
+// ── UI: price bar (ARMED) ─────────────────────────────────────────────────────
+function updateZoneBar(price, signal) {
+  const isLong  = signal.direction === 'LONG';
+  const lo      = isLong ? signal.stop : signal.tp1;
+  const hi      = isLong ? signal.tp1  : signal.stop;
+  const range   = hi - lo;
+  if (range <= 0) return;
+
+  const pct    = (v) => Math.max(0, Math.min(100, (v - lo) / range * 100));
+  const zStart = pct(signal.zone[0]);
+  const zEnd   = pct(signal.zone[1]);
+  const pPos   = pct(price);
+
+  elZoneFill.style.left  = `${zStart}%`;
+  elZoneFill.style.width = `${zEnd - zStart}%`;
+  elPriceMkr.style.left  = `${pPos}%`;
+
+  $('bar-stop-lbl').textContent = signal.stop;
+  $('bar-tp1-lbl').textContent  = signal.tp1;
+
+  const [zMin, zMax] = signal.zone;
+  let distText;
+  let dist = 0;
+  if (price >= zMin && price <= zMax) {
+    distText = '★ Inside zone';
+  } else if (isLong) {
+    if (price < zMin) {
+      dist = zMin - price;
+      distText = `${dist.toFixed(2)} pts below zone`;
+    } else {
+      dist = price - zMax;
+      distText = `${dist.toFixed(2)} pts above zone`;
+    }
+  } else {
+    if (price > zMax) {
+      dist = price - zMax;
+      distText = `${dist.toFixed(2)} pts above zone`;
+    } else {
+      dist = zMin - price;
+      distText = `${dist.toFixed(2)} pts below zone`;
+    }
+  }
+  elDistText.textContent = distText;
+
+  if (dist >= 20) {
+    elZoneStaleWarn.className   = 'warn-red';
+    elZoneStaleWarn.textContent = `✗ Zone may be stale — ${dist.toFixed(1)} pts away\nPress Reset to re-scan`;
+  } else if (dist >= 10) {
+    elZoneStaleWarn.className   = 'warn-yellow';
+    elZoneStaleWarn.textContent = `⚠ Price is ${dist.toFixed(1)} pts from zone`;
+  } else {
+    elZoneStaleWarn.className   = '';
+    elZoneStaleWarn.textContent = '';
+  }
+}
+
+// ── UI: price update ─────────────────────────────────────────────────────────
+function handlePriceUpdate(d) {
+  const price = d.price;
+
+  if (prevPrice !== null) {
+    elPrice.className = price > prevPrice ? 'up' : price < prevPrice ? 'down' : '';
+  }
+  elPrice.textContent = price.toFixed(2);
+  prevPrice = price;
+
+  if (d.stateCtx === 'ARMED' && curSignal) {
+    updateZoneBar(price, curSignal);
+  }
+
+  if (d.stateCtx === 'LIVE') {
+    $('sig-cur').textContent = price.toFixed(2);
+    const pnlEl = $('sig-pnl');
+    pnlEl.textContent = (d.pnl >= 0 ? '+' : '') + d.pnl.toFixed(2);
+    pnlEl.className   = `sig-val ${d.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`;
+    $('sig-d1').textContent = d.distTp1.toFixed(2);
+    $('sig-d2').textContent = d.distTp2.toFixed(2);
+  }
+}
+
+// ── UI: signal log ────────────────────────────────────────────────────────────
+function renderLog(log) {
+  elLogWrap.innerHTML = log.map(e => {
+    const t   = typeof e.time === 'string' && e.time.includes(':')
+                  ? e.time.substring(0, 5)
+                  : new Date(e.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const dir = e.direction || 'WAIT';
+    const cls = dir === 'LONG' ? 'long' : dir === 'SHORT' ? 'short' : 'wait';
+    const rrStr    = e.rr ? `${e.rr}R` : '';
+    const durStr   = e.duration != null ? `scan took ${Math.round(e.duration / 1000)}s` : '';
+    const staleStr = e.stale ? ' ⚠stale' : '';
+    const parts    = [rrStr, durStr].filter(Boolean);
+    const detail   = parts.join(' — ');
+    return `<div class="log-entry">
+      <span class="log-time">${t}</span>
+      <span class="log-dir ${cls}">${dir}</span>
+      <span class="log-result ${e.result}">${e.result}${staleStr}</span>
+      ${detail ? `<span class="log-rr">${detail}</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+function connect() {
+  if (es) es.close();
+  es = new EventSource('/stream');
+
+  es.addEventListener('init', (e) => {
+    const d = JSON.parse(e.data);
+    curState   = d.state;
+    curSignal  = d.signal;
+    curMode    = d.mode;
+    updateMode(d.mode);
+    if (d.currentSymbol) updateSymbol(d.currentSymbol);
+    setBotRunning(d.running !== false);
+
+    if (d.claudeOutput) elClaudeOut.textContent = d.claudeOutput;
+    if (d.scanLog?.length) renderLog(d.scanLog);
+    if (d.lastPrice) { elPrice.textContent = d.lastPrice.toFixed(2); prevPrice = d.lastPrice; }
+    if (d.sessionLevels) renderSessionLevels(d.sessionLevels);
+    if (d.nearLevel && d.lastPrice) {
+      const dist = Math.abs(d.lastPrice - d.nearLevel.price);
+      showNearLevel(d.nearLevel.name, d.nearLevel.price, dist);
+    }
+
+    if (!d.running) {
+      renderStopped();
+    } else if (d.state === 'HUNTING') {
+      renderHunting();
+    } else if (d.state === 'ARMED') {
+      renderArmed(d.signal);
+    } else if (d.state === 'LIVE') {
+      renderLive(d.signal, d.entry);
+    }
+
+    // If we reconnected mid-scan, show the spinner and existing output
+    if (d.scanActive) {
+      elSpinner.classList.add('active');
+      elScanBar.textContent = '⟳ Scan in progress (reconnected)…';
+      elScanBar.className = 'scanning';
+      if (d.claudeOutput) elClaudeOut.textContent = d.claudeOutput;
+    }
+
+    elConnDot.classList.add('connected');
+  });
+
+  // Catch-up event: server sends full output so far when a client reconnects mid-scan
+  es.addEventListener('scan_catchup', (e) => {
+    const d = JSON.parse(e.data);
+    elClaudeOut.textContent = d.output;
+    elSpinner.classList.add('active');
+    elScanBar.textContent = `⟳ Scan #${d.scanCount} in progress (reconnected)…`;
+    elScanBar.className = 'scanning';
+  });
+
+  es.addEventListener('state_change', (e) => {
+    const d = JSON.parse(e.data);
+    curState  = d.state;
+    curSignal = d.signal || null;
+
+    if (d.state === 'HUNTING') {
+      renderHunting(d.reason);
+    } else if (d.state === 'ARMED') {
+      renderArmed(d.signal);
+    } else if (d.state === 'LIVE') {
+      renderLive(d.signal, d.entry);
+      playBeep(d.signal.direction === 'LONG');
+      toast(`LIVE — ${d.signal.direction} @ ${d.entry}`, d.signal.direction === 'LONG' ? 'var(--green)' : 'var(--red)');
+    }
+  });
+
+  es.addEventListener('session_loading', () => {
+    $('session-loading-msg').classList.add('active');
+    $('lvl-asia').textContent   = '—';
+    $('lvl-london').textContent = '—';
+    $('lvl-pd').textContent     = '—';
+    $('lvl-ny').textContent     = '—';
+  });
+
+  es.addEventListener('session_levels', (e) => {
+    const d = JSON.parse(e.data);
+    renderSessionLevels(d.levels);
+    toast('Session levels loaded', 'var(--green)');
+  });
+
+  es.addEventListener('near_level', (e) => {
+    const d = JSON.parse(e.data);
+    showNearLevel(d.level, d.levelPrice, d.dist);
+  });
+
+  es.addEventListener('level_clear', () => {
+    hideNearLevel();
+  });
+
+  es.addEventListener('prefilter_skip', (e) => {
+    const d = JSON.parse(e.data);
+    elScanLbl.textContent = `Pre-filter: ${d.level} — ${d.reason}`;
+    setTimeout(() => {
+      if (elScanLbl.textContent.startsWith('Pre-filter:')) elScanLbl.textContent = '';
+    }, 4000);
+  });
+
+  es.addEventListener('stopped', () => {
+    setBotRunning(false);
+    renderStopped();
+    toast('Bot stopped', 'var(--red)');
+  });
+
+  es.addEventListener('started', () => {
+    setBotRunning(true);
+    renderHunting();
+    toast('Starting...', 'var(--yellow)');
+  });
+
+  es.addEventListener('scan_started', (e) => {
+    const d = JSON.parse(e.data);
+    elClaudeOut.textContent = '';
+    elSpinner.classList.add('active');
+    const levelStr = d.level ? ` — ${d.level}` : '';
+    elScanLbl.textContent = `Scan #${d.count}${levelStr}`;
+
+    const timeStr = new Date(d.time).toLocaleTimeString('en-US', {
+      timeZone: 'America/Los_Angeles', hour12: false,
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    elScanBar.textContent = `⟳ Claude scanning${levelStr}... started ${timeStr} PST`;
+    elScanBar.className   = 'scanning';
+    if (scanDoneTimer) { clearTimeout(scanDoneTimer); scanDoneTimer = null; }
+  });
+
+  es.addEventListener('claude_token', (e) => {
+    const d = JSON.parse(e.data);
+    elClaudeOut.textContent += d.token;
+    elClaudeOut.scrollTop = elClaudeOut.scrollHeight;
+  });
+
+  es.addEventListener('scan_complete', (e) => {
+    const d = JSON.parse(e.data);
+    elSpinner.classList.remove('active');
+    elScanLbl.textContent = d.result === 'WAIT' ? 'No signal — watching levels…' : '';
+  });
+
+  es.addEventListener('scan_finished', (e) => {
+    const d = JSON.parse(e.data);
+    elSpinner.classList.remove('active');
+    const secs = d.duration != null ? (d.duration / 1000).toFixed(0) : '?';
+    const timeStr = new Date(d.time).toLocaleTimeString('en-US', {
+      timeZone: 'America/Los_Angeles', hour12: false,
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    elScanBar.textContent = `✓ Scan completed in ${secs}s at ${timeStr} PST`;
+    elScanBar.className   = 'done';
+    if (scanDoneTimer) clearTimeout(scanDoneTimer);
+    scanDoneTimer = setTimeout(() => {
+      elScanBar.className = '';
+    }, 5000);
+  });
+
+  es.addEventListener('signal_missed', (e) => {
+    const d = JSON.parse(e.data);
+    toast(`MISSED — ${d.signal.direction} zone passed during scan`, 'var(--red)');
+  });
+
+  es.addEventListener('price_update', (e) => {
+    handlePriceUpdate(JSON.parse(e.data));
+  });
+
+  es.addEventListener('signal_log', (e) => {
+    renderLog(JSON.parse(e.data).log);
+  });
+
+  es.addEventListener('mode_change', (e) => {
+    updateMode(JSON.parse(e.data).mode);
+  });
+
+  es.addEventListener('symbol_change', (e) => {
+    const d = JSON.parse(e.data);
+    updateSymbol(d.symbol);
+    toast(`Symbol → ${d.symbol}`, 'var(--blue)');
+  });
+
+  es.addEventListener('heartbeat', (e) => {
+    const d = JSON.parse(e.data);
+    const el = $('heartbeat-bar');
+    if (!el) return;
+    if (d.nearestLevel && d.nearestDist !== null) {
+      let color;
+      if (d.scanActive)        color = 'var(--red)';
+      else if (d.nearestDist < 50)  color = 'var(--green)';
+      else if (d.nearestDist < 100) color = 'var(--yellow)';
+      else                          color = 'var(--muted)';
+      el.style.color = color;
+      el.textContent = `\u{1F441} Nearest: ${d.nearestLevel} ${d.nearestPrice} — ${d.nearestDist} pts away`;
+    } else {
+      el.style.color = 'var(--muted)';
+      el.textContent = d.running ? '\u{1F441} No levels loaded' : '';
+    }
+  });
+
+  es.addEventListener('tv_status', (e) => {
+    const d = JSON.parse(e.data);
+    elConnDot.classList.toggle('connected', d.connected);
+  });
+
+  es.addEventListener('error', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      elScanLbl.textContent = `⚠ ${d.message}`;
+    } catch {}
+    elSpinner.classList.remove('active');
+  });
+
+  es.onerror = () => {
+    elConnDot.classList.remove('connected');
+    // readyState CONNECTING (0) = browser already auto-reconnecting — do nothing.
+    // readyState CLOSED (2)     = gave up — manually reconnect.
+    // Without this check, connect() kills the browser's own fresh reconnection every 3s.
+    if (es.readyState === EventSource.CLOSED) {
+      elScanLbl.textContent = 'Reconnecting…';
+      setTimeout(connect, 2000);
+    }
+  };
+}
+
+// ── Symbol ────────────────────────────────────────────────────────────────────
+function updateSymbol(sym) {
+  curSymbol = sym;
+  $('symbol-label').textContent = sym;
+  $('symbol-select').value = sym;
+}
+
+function changeSymbol(sym) {
+  if (sym === curSymbol) return;
+  toast(`Switching to ${sym}…`, 'var(--blue)');
+  fetch('/symbol', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ symbol: sym }) })
+    .then(r => r.json())
+    .then(d => { if (d.ok) { updateSymbol(sym); } else { toast('Symbol switch failed', 'var(--red)'); } });
+}
+
+// ── Mode ──────────────────────────────────────────────────────────────────────
+function updateMode(mode) {
+  curMode = mode;
+  elModeBadge.textContent = mode.toUpperCase();
+  elModeBadge.className   = `${mode}`;
+  $('btn-swing').classList.toggle('active-mode', mode === 'swing');
+  $('btn-scalp').classList.toggle('active-mode', mode === 'scalp');
+}
+
+function setMode(mode) {
+  if (mode === curMode) return;
+  fetch('/mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ mode }) })
+    .then(r => r.json())
+    .then(d => { if (d.ok) { updateMode(mode); toast(`Mode: ${mode.toUpperCase()}`); } });
+}
+
+// ── Buttons ───────────────────────────────────────────────────────────────────
+function forceScan() {
+  fetch('/forcescan', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => toast(d.ok ? `Force scan: ${d.level || 'triggered'}` : d.message));
+}
+
+function doReset() {
+  fetch('/reset', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => { if (d.ok) toast('Reset → HUNTING'); });
+}
+
+function doStopStart() {
+  if (botRunning) {
+    fetch('/stop', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => { if (!d.ok) toast(d.message || 'Stop failed'); });
+  } else {
+    fetch('/start')
+      .then(r => r.json())
+      .then(d => { if (!d.ok) toast(d.message || 'Start failed'); });
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>

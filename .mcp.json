@@ -1,0 +1,10 @@
+{
+    "mcpServers": 
+    {
+      "tradingview": 
+      {
+        "command": "node",
+        "args": ["C:/Users/ShivHax/Documents/TradingBots/tradingview-mcp/src/server.js"]
+      }
+    }
+}

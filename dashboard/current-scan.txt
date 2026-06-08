@@ -1,0 +1,5 @@
+You have TradingView MCP tools available. Use them now. MNQ1! price is approaching Asia Low at 30517.25. Current price: 30475. Quick check — skip screenshot, summary:true, max 15 bars: 1) Was Asia Low swept in last 5 bars? Yes/No 2) If swept: did price reclaim within 3 candles? Yes/No 3) If reclaimed: is 5m CHoCH/MSS confirmed? Yes/No 4) If confirmed: is FVG entry within 15pts of current price? 5) R:R at least 1.5R to nearest liquidity? If all yes: DIRECTION:LONG/SHORT ZONE:X-X STOP:X TP1:X TP2:X If any no: SIGNAL:WAIT — [which condition failed] Write your brief analysis, then end your text with a JSON block in this exact format:
+```json
+{"decision":"LONG|SHORT|WAIT","reason_code":"short_snake_case","setup_state":"untouched|swept_no_reclaim|reclaimed_no_confirmation|confirmed","zone":[low,high],"stop":number,"tp1":number,"tp2":number,"invalidate_if":"condition text"}
+```
+The JSON block must be the final text in your response. After the JSON, call chart_set_timeframe to restore to 15m as your final action.
