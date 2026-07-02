@@ -65,6 +65,21 @@ features:
   # Level resolution: session/day/prior-day levels use the finest timeframe that
   # COVERS the window (1m -> 5m -> 15m -> 1h). Opening range is 1m-only, hardcoded.
 
+strategies:
+  # Plugin strategies producing CANDIDATES only. Decisions come from the risk gate.
+  enabled: ["session_liquidity_trap"]   # orb_breakout is a skeleton; enable deliberately
+  detection_timeframe: 5m
+  lookback_bars: 96              # ~8h of 5m bars scanned per pass
+  confirm_max_candles: 12        # sweep -> MSS/CISD budget (5m candles)
+  stop_buffer_atr_mult: 0.25     # stop = sweep extreme -/+ this * ATR(14, 5m)
+  entry_zone_atr_mult: 0.15      # structure-retest entry zone half-width
+  min_target_rr_for_grade_a: 2.0
+  max_candidates_per_scan: 3
+  orb:
+    enabled: false               # conservative default; breakout/fakeout playbook is v0.2
+    confirm_timeframe: 5m
+    retest_max_candles: 6
+
 risk:
   # Consumed by the risk/freshness gate (Phase 4). Defined now so schema/config are stable.
   manual_approval_required: true    # hard rule, not configurable at runtime

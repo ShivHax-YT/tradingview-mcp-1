@@ -6,6 +6,7 @@
     copilot collect [--loop]            incremental 1m collection (+ derived TFs)
     copilot status                      DB coverage, freshness, gaps
     copilot state --symbol MNQ          structured market-state JSON from stored bars
+    copilot scan  --symbol MNQ          run strategies on stored bars -> candidates
     copilot load-fixtures <csv>         load fixture bars (tests/offline dev ONLY)
 
 This tool never places orders. LONG/SHORT/WAIT/REJECT output (later phases)
@@ -101,6 +102,32 @@ def cmd_state(config: Config, args) -> int:
     return 0
 
 
+def cmd_scan(config: Config, args) -> int:
+    import json as _json
+
+    from .strategies.engine import scan
+
+    with Store(config.db_file) as store:
+        store.init_schema()
+        result = scan(store, config, args.symbol, as_of_ts=args.as_of,
+                      persist=not args.no_persist)
+        if args.json:
+            print(_json.dumps(result.to_dict(), indent=2, default=str))
+        else:
+            st = result.state
+            print(f"{st.symbol} {st.trading_day} session={st.session} price={st.current_price}")
+            if not result.candidates:
+                print("no candidates — WAIT is the default posture")
+            for c in result.candidates:
+                print(f"  [{c.grade}] {c.strategy} {c.direction.upper()} "
+                      f"entry~{c.entry_ref} stop={c.stop} target={c.target} ({c.target_name}) "
+                      f"rr={c.rr:.2f} confluences={','.join(c.confluences)}")
+                if c.warnings:
+                    print(f"      warnings: {'; '.join(c.warnings)}")
+            print("note: candidates are NOT trade decisions; run the risk gate / packet for that")
+    return 0
+
+
 def cmd_load_fixtures(config: Config, args) -> int:
     from .data.fixtures import load_fixture_csv
 
@@ -138,6 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--as-of", dest="as_of", type=int, default=None,
                    help="epoch seconds; reconstruct state as of this moment (replay)")
 
+    p = sub.add_parser("scan", help="run strategy detection on stored bars (no bridge needed)")
+    p.add_argument("--symbol", default="MNQ")
+    p.add_argument("--as-of", dest="as_of", type=int, default=None)
+    p.add_argument("--json", action="store_true", help="full JSON output")
+    p.add_argument("--no-persist", action="store_true", help="don't write scan results to the DB")
+
     p = sub.add_parser("load-fixtures", help="load fixture CSV (tests/offline dev only)")
     p.add_argument("csv")
 
@@ -149,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         "collect": cmd_collect,
         "status": cmd_status,
         "state": cmd_state,
+        "scan": cmd_scan,
         "load-fixtures": cmd_load_fixtures,
     }
     try:

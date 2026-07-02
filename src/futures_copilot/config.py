@@ -72,6 +72,24 @@ class FeaturesConfig(BaseModel):
     max_fvgs_in_state: int = 5
 
 
+class OrbConfig(BaseModel):
+    enabled: bool = False            # skeleton stays off until explicitly enabled
+    confirm_timeframe: str = "5m"
+    retest_max_candles: int = 6
+
+
+class StrategiesConfig(BaseModel):
+    enabled: list[str] = Field(default_factory=lambda: ["session_liquidity_trap"])
+    detection_timeframe: str = "5m"
+    lookback_bars: int = 96          # scan window on the detection timeframe (~8h of 5m)
+    confirm_max_candles: int = 12    # sweep -> MSS/CISD confirmation budget
+    stop_buffer_atr_mult: float = 0.25
+    entry_zone_atr_mult: float = 0.15
+    min_target_rr_for_grade_a: float = 2.0
+    max_candidates_per_scan: int = 3
+    orb: OrbConfig = Field(default_factory=OrbConfig)
+
+
 class RiskConfig(BaseModel):
     manual_approval_required: bool = True
     auto_execution_enabled: bool = False
@@ -113,6 +131,7 @@ class Config(BaseModel):
     data: DataConfig = Field(default_factory=DataConfig)
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
+    strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
 
     # Directory containing config.yaml; relative paths resolve against it.

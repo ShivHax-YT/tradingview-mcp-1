@@ -113,6 +113,48 @@ class Store:
             for s, tf, n, a, b in rows
         ]
 
+
+    # -- market states / strategy outputs (Phase 3+) ----------------------------
+    def save_market_state(self, symbol: str, ts: int, session: str | None,
+                          current_price: float, json_state: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO market_states (symbol, ts, session, current_price, json_state) VALUES (?,?,?,?,?)",
+            (symbol, ts, session, current_price, json_state),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def latest_market_state(self, symbol: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id, symbol, ts, session, current_price, json_state FROM market_states "
+            "WHERE symbol=? ORDER BY ts DESC, id DESC LIMIT 1", (symbol,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "symbol": row[1], "ts": row[2], "session": row[3],
+                "current_price": row[4], "json_state": row[5]}
+
+    def save_strategy_output(self, symbol: str, ts: int, strategy_name: str,
+                             direction: str | None, grade: str | None, json_output: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO strategy_outputs (symbol, ts, strategy_name, direction, grade, json_output) "
+            "VALUES (?,?,?,?,?,?)",
+            (symbol, ts, strategy_name, direction, grade, json_output),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def latest_strategy_outputs(self, symbol: str, limit: int = 10) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, symbol, ts, strategy_name, direction, grade, json_output "
+            "FROM strategy_outputs WHERE symbol=? ORDER BY id DESC LIMIT ?", (symbol, limit),
+        ).fetchall()
+        return [
+            {"id": r[0], "symbol": r[1], "ts": r[2], "strategy_name": r[3],
+             "direction": r[4], "grade": r[5], "json_output": r[6]}
+            for r in rows
+        ]
+
     def gaps(self, symbol: str, timeframe: str, tf_seconds: int, max_report: int = 20) -> list[dict]:
         """Detect missing-bar gaps (ignoring gaps <= 1 bar). Market closures show up too;
         callers should interpret with session context. Honest data > pretty data."""
