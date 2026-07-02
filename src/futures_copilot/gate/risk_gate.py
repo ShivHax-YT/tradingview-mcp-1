@@ -85,7 +85,7 @@ def _news_blackout(config: Config, horizon_ts: int) -> str | None:
 
 def _evaluate_candidate(
     cand: SignalCandidate, state: MarketState, store: Store, config: Config,
-    passed_this_run: dict[str, int],
+    passed_this_run: dict[str, int], counting_from_table: bool,
 ) -> GateDecision:
     r = config.risk
     horizon = state.as_of_close_ts
@@ -158,13 +158,17 @@ def _evaluate_candidate(
     hit = _news_blackout(config, horizon)
     check("news_blackout_clear", hit is None, f"blackout: {hit}" if hit else "no blackout window active")
 
-    # per-session / per-day caps (counts persisted passing signals + earlier passes this run)
+    # per-session / per-day caps. When this run persists signals, the table
+    # already contains earlier passes from THIS run — adding passed_this_run
+    # again would double-count. The in-run counter only matters when
+    # persist=False (dry runs).
     sess_count = store.count_passing_signals(cand.symbol, state.trading_day, cand.session)
-    sess_count += passed_this_run.get(f"s:{cand.session}", 0)
+    day_count = store.count_passing_signals(cand.symbol, state.trading_day, None)
+    if not counting_from_table:
+        sess_count += passed_this_run.get(f"s:{cand.session}", 0)
+        day_count += passed_this_run.get("day", 0)
     check("session_signal_cap", sess_count < r.max_signals_per_session,
           f"{sess_count} passing signals already this session (max {r.max_signals_per_session})")
-    day_count = store.count_passing_signals(cand.symbol, state.trading_day, None)
-    day_count += passed_this_run.get("day", 0)
     check("day_signal_cap", day_count < r.max_signals_per_day,
           f"{day_count} passing signals already today (max {r.max_signals_per_day})")
 
@@ -201,12 +205,14 @@ def evaluate(
     passed_this_run: dict[str, int] = {}
 
     for cand in ordered:
-        gd = _evaluate_candidate(cand, state, store, config, passed_this_run)
+        gd = _evaluate_candidate(cand, state, store, config, passed_this_run,
+                                 counting_from_table=persist)
         if gd.decision in ("LONG", "SHORT"):
             passed_this_run[f"s:{cand.session}"] = passed_this_run.get(f"s:{cand.session}", 0) + 1
             passed_this_run["day"] = passed_this_run.get("day", 0) + 1
         if persist:
-            dup = store.signal_exists(cand.symbol, cand.ts, cand.setup_type, cand.direction)
+            dup = store.signal_exists(cand.symbol, cand.ts, cand.setup_type, cand.direction,
+                                      swept_level=cand.context.get("swept_level"))
             if dup is not None:
                 gd = GateDecision(**{**gd.__dict__, "signal_id": dup, "duplicate": True})
             else:

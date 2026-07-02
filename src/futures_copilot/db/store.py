@@ -173,13 +173,28 @@ class Store:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def signal_exists(self, symbol: str, ts: int, setup: str, direction_decision: str) -> int | None:
-        """Duplicate guard: same bar + setup already gated (any decision)."""
-        row = self.conn.execute(
-            "SELECT id FROM signals WHERE symbol=? AND ts=? AND setup=? LIMIT 1",
+    def signal_exists(self, symbol: str, ts: int, setup: str, direction: str,
+                      swept_level: str | None = None) -> int | None:
+        """Duplicate guard: same bar + setup + direction + swept level already
+        gated. Two different levels trapped on the same confirmation bar are
+        DIFFERENT signals and must both persist."""
+        import json as _json
+
+        rows = self.conn.execute(
+            "SELECT id, json_signal FROM signals WHERE symbol=? AND ts=? AND setup=?",
             (symbol, ts, setup),
-        ).fetchone()
-        return int(row[0]) if row else None
+        ).fetchall()
+        for rid, js in rows:
+            try:
+                cand = _json.loads(js).get("candidate") or {}
+            except (TypeError, ValueError):
+                cand = {}
+            if cand.get("direction") != direction:
+                continue
+            if swept_level is not None and (cand.get("context") or {}).get("swept_level") != swept_level:
+                continue
+            return int(rid)
+        return None
 
     def count_passing_signals(self, symbol: str, trading_day: str, session: str | None) -> int:
         q = ("SELECT COUNT(*) FROM signals WHERE symbol=? AND trading_day=? "

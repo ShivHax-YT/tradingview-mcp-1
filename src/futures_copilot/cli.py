@@ -9,6 +9,7 @@
     copilot scan  --symbol MNQ          strategies + risk gate on stored bars
     copilot packet [--latest]           write Claude prompt packet (JSON + Markdown)
     copilot journal <bias|review|result|mistake|show>   trading journal
+    copilot dashboard                   launch the local Streamlit dashboard
     copilot load-fixtures <csv>         load fixture bars (tests/offline dev ONLY)
 
 This tool never places orders. LONG/SHORT/WAIT/REJECT output (later phases)
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from .config import Config, load_config
 from .db.store import Store
@@ -211,6 +213,23 @@ def cmd_journal(config: Config, args) -> int:
     return 0
 
 
+def cmd_dashboard(config: Config, _args) -> int:
+    """Launch the Streamlit dashboard (read + journal only; no execution)."""
+    import subprocess
+
+    app = Path(__file__).parent / "dashboard" / "app.py"
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        print("Streamlit is not installed. Install the dashboard extra:\n"
+              "  .venv\\Scripts\\python.exe -m pip install -e .[dashboard]\n"
+              "then run:\n"
+              f"  streamlit run {app}", file=sys.stderr)
+        return 2
+    print(f"launching dashboard: streamlit run {app}")
+    return subprocess.call([sys.executable, "-m", "streamlit", "run", str(app)])
+
+
 def cmd_load_fixtures(config: Config, args) -> int:
     from .data.fixtures import load_fixture_csv
 
@@ -295,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--symbol", default="MNQ")
     q.add_argument("--day", default=None)
 
+    sub.add_parser("dashboard", help="launch the local Streamlit dashboard")
+
     p = sub.add_parser("load-fixtures", help="load fixture CSV (tests/offline dev only)")
     p.add_argument("csv")
 
@@ -309,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan": cmd_scan,
         "packet": cmd_packet,
         "journal": cmd_journal,
+        "dashboard": cmd_dashboard,
         "load-fixtures": cmd_load_fixtures,
     }
     try:

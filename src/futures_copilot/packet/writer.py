@@ -229,13 +229,20 @@ def packet_from_latest(store: Store, config: Config, symbol: str) -> dict[str, A
         raise ValueError(f"no market state stored for {symbol}; run `copilot scan` first")
     state = json.loads(ms["json_state"])
 
-    sigs = store.latest_signals(symbol, limit=1)
+    sigs = store.latest_signals(symbol, limit=10)
     if not sigs:
         gate = {"decision": "WAIT", "signal_id": None, "checklist": [], "reasons": [],
                 "warnings": [], "invalidation": []}
         return build_packet(store, config, state=state, gate=gate, candidate=None)
 
-    row = sigs[0]
+    # Prefer the newest ACTIONABLE signal of the same trading day (a scan can
+    # persist a passing signal and then rejects; the human wants the packet for
+    # the one that matters). Fall back to the newest row (REJECT packets are
+    # legitimate — they explain why you're standing down).
+    newest = sigs[0]
+    passing = [r for r in sigs
+               if r["decision"] in ("LONG", "SHORT") and r["trading_day"] == newest["trading_day"]]
+    row = passing[0] if passing else newest
     js = json.loads(row["json_signal"])
     gate = {
         "decision": row["decision"], "signal_id": row["id"],

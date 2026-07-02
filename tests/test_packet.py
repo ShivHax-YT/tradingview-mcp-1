@@ -88,3 +88,14 @@ def test_similar_setups_surface_in_packet(config, store, gated):
     # the chosen signal itself is excluded; the OTHER gated candidate (london trap) may match
     for s_ in packet["similar_setups"]:
         assert s_["signal_id"] != gate.chosen.signal_id
+
+
+def test_packet_prefers_actionable_signal_of_the_day(config, store, gated):
+    """A scan can persist LONG then REJECT rows; the --latest packet must carry
+    the actionable one, not whichever landed last."""
+    result, gate = gated
+    decisions = [g.decision for g in gate.evaluations]
+    if "REJECT" in decisions:                      # both orderings covered
+        packet = packet_from_latest(store, config, "MNQ")
+        assert packet["risk_gate"]["decision"] == "LONG"
+        assert packet["risk_gate"]["signal_id"] == gate.chosen.signal_id

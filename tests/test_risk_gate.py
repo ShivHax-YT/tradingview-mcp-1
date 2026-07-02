@@ -33,7 +33,8 @@ def test_pass_produces_long_and_persists(config, store, scanned):
     assert out.chosen is not None and out.chosen.signal_id is not None
     assert out.chosen.reasons == []
     assert all(c.passed for c in out.chosen.checklist)
-    row = store.latest_signals("MNQ", limit=5)[0]
+    rows = {r["id"]: r for r in store.latest_signals("MNQ", limit=5)}
+    row = rows[out.chosen.signal_id]
     assert row["decision"] in ("LONG", "SHORT")
     assert row["trading_day"] == "2026-06-24"
     assert json.loads(row["invalidation"])
@@ -163,3 +164,22 @@ def test_gate_is_sole_decision_writer(config, store, scanned):
     assert row["decision"] == out.evaluations[-1].decision or row["decision"] in ("LONG", "SHORT", "REJECT")
     cand_json = json.loads(row["json_signal"])["candidate"]
     assert "decision" not in cand_json
+
+
+def test_caps_not_double_counted_when_persisting(config, store, scanned):
+    """Persisting run: a signal that passes must count ONCE toward the caps.
+    With max 2/session, a scan yielding two passing-quality candidates must not
+    self-block the second via double counting."""
+    state, cands = scanned
+    config.risk.max_stop_atr_mult = 3.0        # let both trap variants pass stop width
+    out = evaluate(state, cands, store, config, persist=True)
+    assert out.decision == "LONG"
+    passing = [g for g in out.evaluations if g.decision == "LONG"]
+    assert len(passing) == 2, (
+        f"expected both candidates to pass (cap=2), got "
+        f"{[(g.decision, g.reasons) for g in out.evaluations]}")
+    # and a THIRD scan-pass today would now be capped by the table alone
+    third = passing[0].candidate.model_copy(update={"ts": passing[0].candidate.ts + 300})
+    out2 = evaluate(state, [third], store, config, persist=True)
+    assert out2.decision == "REJECT"
+    assert any(r.startswith("session_signal_cap") for r in out2.evaluations[0].reasons)
