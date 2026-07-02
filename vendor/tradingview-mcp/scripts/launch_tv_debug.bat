@@ -40,20 +40,4 @@ if "%TV_EXE%"=="" (
 
 echo Found TradingView at: %TV_EXE%
 echo Starting with --remote-debugging-port=%PORT%...
-start "" "%TV_EXE%" --remote-debugging-port=%PORT%
-
-echo Waiting for CDP to become available...
-timeout /t 5 /nobreak >nul
-
-:check
-curl -s http://localhost:%PORT%/json/version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Still waiting...
-    timeout /t 2 /nobreak >nul
-    goto check
-)
-
-echo.
-echo CDP ready at http://localhost:%PORT%
-curl -s http://localhost:%PORT%/json/version
-echo.
+start "" "%TV_E
