@@ -81,6 +81,16 @@ strategies:
     confirm_timeframe: 5m
     retest_max_candles: 6
 
+memory:
+  # Similar-setup memory. v0.1 = deterministic SQL lookup (always on, no config).
+  # The vector adapter is an OPTIONAL local scaffold: no network embeddings,
+  # no paid services. backend "chroma" needs `pip install chromadb`.
+  vector:
+    enabled: false
+    backend: memory        # memory | chroma
+    path: data/vector_memory
+    top_k: 5
+
 risk:
   # Consumed by the risk/freshness gate (Phase 4). Defined now so schema/config are stable.
   manual_approval_required: true    # hard rule, not configurable at runtime

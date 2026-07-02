@@ -130,6 +130,17 @@ class RiskConfig(BaseModel):
         return v
 
 
+class VectorMemoryConfig(BaseModel):
+    enabled: bool = False            # v0.1 default: SQL memory only
+    backend: str = "memory"          # memory (in-process) | chroma (optional local dep)
+    path: str = "data/vector_memory"
+    top_k: int = 5
+
+
+class MemoryConfig(BaseModel):
+    vector: VectorMemoryConfig = Field(default_factory=VectorMemoryConfig)
+
+
 class AppConfig(BaseModel):
     db_path: str = "data/copilot.db"
     timezone: str = "America/New_York"
@@ -144,6 +155,7 @@ class Config(BaseModel):
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
 
     # Directory containing config.yaml; relative paths resolve against it.
