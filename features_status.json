@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "updated": "2026-07-02",
+  "features": {
+    "data.tvmcp_bridge":        {"status": "done",    "phase": 1, "notes": "read-only allowlist; CDP :9222; pinned vendor commit"},
+    "data.backfill_native_tfs": {"status": "done",    "phase": 1, "notes": "1m/5m/15m/1h, newest<=500 bars each"},
+    "data.collect_1m_loop":     {"status": "done",    "phase": 1, "notes": "drops unclosed last bar; derived TFs resampled"},
+    "db.sqlite_store":          {"status": "done",    "phase": 1, "notes": "WAL with DELETE fallback; source column"},
+    "features.sessions":        {"status": "done",    "phase": 2, "notes": "18:00 ET trading day; asia/london/ny; DST-safe"},
+    "features.levels_multi_tf": {"status": "done",    "phase": 2, "notes": "finest covering TF 1m->5m->15m->1h; horizon clipping; OR 1m-only"},
+    "features.swings_mss_cisd": {"status": "done",    "phase": 2, "notes": "confirmation-lag aware"},
+    "features.fvg_lifecycle":   {"status": "done",    "phase": 2, "notes": "open/mitigated/filled/inverted with close-time stamps"},
+    "features.market_state":    {"status": "done",    "phase": 2, "notes": "as-of replay; level_sources provenance"},
+    "strategy.engine":          {"status": "building", "phase": 3},
+    "strategy.liquidity_trap":  {"status": "building", "phase": 3},
+    "strategy.orb_skeleton":    {"status": "building", "phase": 3, "notes": "conservative, disabled by default"},
+    "gate.risk":                {"status": "building", "phase": 4},
+    "packet.claude":            {"status": "building", "phase": 5, "notes": "no writable decision field"},
+    "journal.cli":              {"status": "building", "phase": 6},
+    "vault.trading_brain_seed": {"status": "building", "phase": 6},
+    "memory.sql_similar":       {"status": "building", "phase": 7},
+    "memory.vector_adapter":    {"status": "scaffold", "phase": 7, "notes": "optional, local-only, off by default"},
+    "dashboard.streamlit":      {"status": "building", "phase": 8},
+    "adapters.paid_data":       {"status": "excluded", "notes": "Databento/Tradovate/CME out of v0.1 by rule"}
+  }
+}
