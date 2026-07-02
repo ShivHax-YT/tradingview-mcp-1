@@ -13,13 +13,31 @@
   1m-only; 4h dropped from canonical until backfill supports it; stale test updated to
   assert the new honest behavior (lone prior-day bar ⇒ None, 15m coverage ⇒ level+source).
 
-## In flight (this pass)
-- Phase 3 strategy engine (liquidity trap full + ORB skeleton)
-- Phase 4 risk gate → LONG/SHORT/WAIT/REJECT
-- Phase 5 Claude prompt packets (JSON+MD, no decision field)
-- Phase 6 journal CLI + trading_brain_seed Obsidian vault
-- Phase 7 SQL similar-setup memory (+ optional vector scaffold, off by default)
-- Phase 8 Streamlit dashboard (dark Legend-style)
+## Done (this pass, 2026-07-02)
+- **Phase 3 — strategy engine**: plugin interface (`detect(ctx) -> [SignalCandidate]`),
+  MTF Session Liquidity Trap complete (sweep → reclaim ≤3 → MSS/CISD ≤12 → FVG/structure
+  retest entry → ATR stop beyond extreme → next-liquidity target, graded by confluence),
+  ORB breakout/fakeout skeleton (conservative, `orb.enabled: false`).
+- **Phase 4 — risk gate**: 11-check pipeline (geometry, confirmed-close, min RR, staleness,
+  chase, stop/target ATR caps, session filter, chop filter, manual news blackouts,
+  session/day caps with dedupe); LONG/SHORT/WAIT/REJECT; sole writer of `signals.decision`.
+- **Phase 5 — Claude packets**: JSON + Markdown writer; packet embeds state, candidate,
+  checklist, bias, mistakes, similar setups; Claude output schema is explanation-only
+  (`additionalProperties: false`, no decision field). No Anthropic API in v0.1.
+- **Phase 6 — journal + vault**: CLI `journal bias|review|result|mistake|show`;
+  `trading_brain_seed/` Obsidian vault (templates, playbooks, rules, mistake index, linked graph).
+- **Phase 7 — memory**: deterministic SQL similar-setup lookup with auditable bands +
+  outcomes; optional LOCAL vector scaffold (in-memory + chroma adapters) off by default.
+- **Phase 8 — dashboard**: Streamlit, Legend-style dark theme; overview (candles + level
+  ladder + context), signals inspector w/ checklist, journal forms, mistakes, memory,
+  packet viewer/downloads. Read + journal only. Headless boot + AppTest execution verified.
+- Suite: **141 tests green** (sandbox py3.10; target py3.12+ per pyproject).
+
+## Known state / blockers
+- Live gate NOT re-run this pass: the build sandbox cannot reach TradingView Desktop's
+  CDP :9222 on the host machine. `data/copilot.db` shows 0 bytes from the sandbox
+  (either empty or an un-checkpointed WAL artifact of the mount). Run on Windows:
+  `copilot health && copilot backfill --symbols MNQ && copilot scan --symbol MNQ`.
 
 ## Later / explicitly deferred
 - 4h canonical timeframe (needs real backfill support)
