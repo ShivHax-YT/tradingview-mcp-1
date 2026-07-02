@@ -91,3 +91,11 @@ risk:
   reclaim_max_candles: 3            # spec range 3-5; start strict
   max_stop_atr_mult: 2.0            # stop wider than N*ATR(14) rejects
   max_entry_distance_atr_mult: 0.5  # price farther than N*ATR from entry zone = chased
+  min_target_atr_mult: 0.5          # target closer than this*ATR = not worth it
+  chop_min_day_range_atr_mult: 2.0  # day span < this*ATR15 = chop, stand down
+  allowed_sessions: ["london", "ny"]
+  # MANUAL news windows (America/New_York wall clock). No scraping, no feeds —
+  # if it matters, you type it in. Example:
+  #   news_blackouts:
+  #     - {start: "2026-07-02 08:30", minutes: 30, label: "NFP"}
+  news_blackouts: []

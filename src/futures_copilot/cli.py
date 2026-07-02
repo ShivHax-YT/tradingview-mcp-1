@@ -105,14 +105,30 @@ def cmd_state(config: Config, args) -> int:
 def cmd_scan(config: Config, args) -> int:
     import json as _json
 
+    from .gate import evaluate
     from .strategies.engine import scan
 
     with Store(config.db_file) as store:
         store.init_schema()
         result = scan(store, config, args.symbol, as_of_ts=args.as_of,
                       persist=not args.no_persist)
+        gate = evaluate(result.state, result.candidates, store, config,
+                        persist=not args.no_persist)
         if args.json:
-            print(_json.dumps(result.to_dict(), indent=2, default=str))
+            out = result.to_dict()
+            out["gate"] = {
+                "decision": gate.decision,
+                "chosen_signal_id": gate.chosen.signal_id if gate.chosen else None,
+                "evaluations": [
+                    {"decision": g.decision, "signal_id": g.signal_id,
+                     "duplicate": g.duplicate, "reasons": g.reasons, "warnings": g.warnings,
+                     "invalidation": g.invalidation,
+                     "checklist": [c.__dict__ for c in g.checklist],
+                     "candidate": g.candidate.model_dump()}
+                    for g in gate.evaluations
+                ],
+            }
+            print(_json.dumps(out, indent=2, default=str))
         else:
             st = result.state
             print(f"{st.symbol} {st.trading_day} session={st.session} price={st.current_price}")
@@ -124,7 +140,12 @@ def cmd_scan(config: Config, args) -> int:
                       f"rr={c.rr:.2f} confluences={','.join(c.confluences)}")
                 if c.warnings:
                     print(f"      warnings: {'; '.join(c.warnings)}")
-            print("note: candidates are NOT trade decisions; run the risk gate / packet for that")
+            print(f"GATE: {gate.summary()}")
+            for g in gate.evaluations:
+                if g.decision == "REJECT":
+                    print(f"  REJECT [{g.candidate.grade}] {g.candidate.setup_type} "
+                          f"{g.candidate.direction}: {'; '.join(g.reasons)}")
+            print("decision support only — you approve and (paper) trade manually; WAIT is default")
     return 0
 
 

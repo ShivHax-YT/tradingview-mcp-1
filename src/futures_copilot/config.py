@@ -90,6 +90,13 @@ class StrategiesConfig(BaseModel):
     orb: OrbConfig = Field(default_factory=OrbConfig)
 
 
+class NewsBlackout(BaseModel):
+    """One MANUALLY-maintained news window. start is wall-clock America/New_York."""
+    start: str                        # "YYYY-MM-DD HH:MM"
+    minutes: int = 15
+    label: str = ""
+
+
 class RiskConfig(BaseModel):
     manual_approval_required: bool = True
     auto_execution_enabled: bool = False
@@ -100,6 +107,10 @@ class RiskConfig(BaseModel):
     reclaim_max_candles: int = 3
     max_stop_atr_mult: float = 2.0
     max_entry_distance_atr_mult: float = 0.5
+    min_target_atr_mult: float = 0.5          # target closer than this*ATR rejects
+    chop_min_day_range_atr_mult: float = 2.0  # day span below this*ATR15 = chop
+    allowed_sessions: list[str] = Field(default_factory=lambda: ["london", "ny"])
+    news_blackouts: list[NewsBlackout] = Field(default_factory=list)
 
     @field_validator("auto_execution_enabled")
     @classmethod

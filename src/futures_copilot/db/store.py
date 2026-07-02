@@ -155,6 +155,60 @@ class Store:
             for r in rows
         ]
 
+
+    # -- signals (Phase 4+; decision written by the risk gate ONLY) -------------
+    def save_signal(self, *, symbol: str, ts: int, session: str | None, trading_day: str,
+                    decision: str, setup: str | None, grade: str | None,
+                    entry_lo: float | None, entry_hi: float | None, stop: float | None,
+                    tp1: float | None, tp2: float | None, rr: float | None,
+                    reasons: str, warnings: str, invalidation: str, json_signal: str) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO signals (symbol, ts, session, trading_day, decision, setup, grade,
+                                    entry_lo, entry_hi, stop, tp1, tp2, rr,
+                                    reasons, warnings, invalidation, json_signal)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (symbol, ts, session, trading_day, decision, setup, grade,
+             entry_lo, entry_hi, stop, tp1, tp2, rr, reasons, warnings, invalidation, json_signal),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def signal_exists(self, symbol: str, ts: int, setup: str, direction_decision: str) -> int | None:
+        """Duplicate guard: same bar + setup already gated (any decision)."""
+        row = self.conn.execute(
+            "SELECT id FROM signals WHERE symbol=? AND ts=? AND setup=? LIMIT 1",
+            (symbol, ts, setup),
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def count_passing_signals(self, symbol: str, trading_day: str, session: str | None) -> int:
+        q = ("SELECT COUNT(*) FROM signals WHERE symbol=? AND trading_day=? "
+             "AND decision IN ('LONG','SHORT')")
+        params: list = [symbol, trading_day]
+        if session is not None:
+            q += " AND session=?"
+            params.append(session)
+        return int(self.conn.execute(q, params).fetchone()[0])
+
+    def latest_signals(self, symbol: str | None = None, limit: int = 20) -> list[dict]:
+        q = ("SELECT id, symbol, ts, session, trading_day, decision, setup, grade, "
+             "entry_lo, entry_hi, stop, tp1, tp2, rr, reasons, warnings, invalidation, json_signal "
+             "FROM signals")
+        params: list = []
+        if symbol is not None:
+            q += " WHERE symbol=?"
+            params.append(symbol)
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cols = ["id", "symbol", "ts", "session", "trading_day", "decision", "setup", "grade",
+                "entry_lo", "entry_hi", "stop", "tp1", "tp2", "rr", "reasons", "warnings",
+                "invalidation", "json_signal"]
+        return [dict(zip(cols, r)) for r in self.conn.execute(q, params).fetchall()]
+
+    def get_signal(self, signal_id: int) -> dict | None:
+        rows = [r for r in self.latest_signals(limit=1_000_000) if r["id"] == signal_id]
+        return rows[0] if rows else None
+
     def gaps(self, symbol: str, timeframe: str, tf_seconds: int, max_report: int = 20) -> list[dict]:
         """Detect missing-bar gaps (ignoring gaps <= 1 bar). Market closures show up too;
         callers should interpret with session context. Honest data > pretty data."""
