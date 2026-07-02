@@ -99,3 +99,22 @@ def test_packet_prefers_actionable_signal_of_the_day(config, store, gated):
         packet = packet_from_latest(store, config, "MNQ")
         assert packet["risk_gate"]["decision"] == "LONG"
         assert packet["risk_gate"]["signal_id"] == gate.chosen.signal_id
+
+
+def test_packet_latest_does_not_resurrect_stale_signal(config, store, gated):
+    """If the newest market state is past the freshness window, the packet
+    should return WAIT instead of packaging an old stored signal."""
+    result, gate = gated
+    assert gate.decision == "LONG"
+    stale_state = result.state.model_copy(update={
+        "ts": result.state.ts + 3600,
+        "as_of_close_ts": result.state.as_of_close_ts + 3600,
+    })
+    store.save_market_state(
+        stale_state.symbol, stale_state.ts, stale_state.session,
+        stale_state.current_price, stale_state.to_json(),
+    )
+
+    packet = packet_from_latest(store, config, "MNQ")
+    assert packet["risk_gate"]["decision"] == "WAIT"
+    assert packet["candidate"] is None

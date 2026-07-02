@@ -26,6 +26,7 @@ from ..config import Config
 from ..db.store import Store
 from ..features.sessions import to_et
 from ..memory import similar_setups
+from ..strategies.liquidity_trap import TF_SECONDS
 
 PACKET_SCHEMA_VERSION = "copilot.packet.v1"
 
@@ -221,6 +222,27 @@ def write_packet(packet: dict[str, Any], config: Config) -> tuple[Path, Path]:
     return jp, mp
 
 
+def _wait_packet(store: Store, config: Config, state: dict[str, Any]) -> dict[str, Any]:
+    gate = {"decision": "WAIT", "signal_id": None, "checklist": [], "reasons": [],
+            "warnings": [], "invalidation": []}
+    return build_packet(store, config, state=state, gate=gate, candidate=None)
+
+
+def _signal_is_current(row: dict[str, Any], state: dict[str, Any], config: Config) -> bool:
+    """Return whether a stored signal is still fresh for the newest market state."""
+    if row["trading_day"] != state.get("trading_day"):
+        return False
+    try:
+        js = json.loads(row["json_signal"])
+        cand = js.get("candidate") or {}
+        confirmed = int(cand["confirmed_close_ts"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    horizon = int(state.get("as_of_close_ts") or state.get("ts") or 0)
+    tf_s = TF_SECONDS.get(cand.get("detection_timeframe", "5m"), 300)
+    return horizon <= confirmed + config.risk.signal_expiry_candles * tf_s
+
+
 def packet_from_latest(store: Store, config: Config, symbol: str) -> dict[str, Any]:
     """Rebuild a packet from the newest persisted state + signal (offline path).
     Falls back to a WAIT packet when no signal exists yet."""
@@ -231,9 +253,10 @@ def packet_from_latest(store: Store, config: Config, symbol: str) -> dict[str, A
 
     sigs = store.latest_signals(symbol, limit=10)
     if not sigs:
-        gate = {"decision": "WAIT", "signal_id": None, "checklist": [], "reasons": [],
-                "warnings": [], "invalidation": []}
-        return build_packet(store, config, state=state, gate=gate, candidate=None)
+        return _wait_packet(store, config, state)
+    sigs = [r for r in sigs if _signal_is_current(r, state, config)]
+    if not sigs:
+        return _wait_packet(store, config, state)
 
     # Prefer the newest ACTIONABLE signal of the same trading day (a scan can
     # persist a passing signal and then rejects; the human wants the packet for

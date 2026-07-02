@@ -36,7 +36,7 @@ vendor\tradingview-mcp\scripts\launch_tv_debug.bat
 .venv\Scripts\copilot dashboard              :: local Streamlit dashboard
 ```
 
-Tests: `.venv\Scripts\python.exe -m pytest -q` (141 tests).
+Tests: `.venv\Scripts\python.exe -m pytest -q` (142 tests).
 
 ## What's inside
 

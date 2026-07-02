@@ -31,7 +31,8 @@
 - **Phase 8 — dashboard**: Streamlit, Legend-style dark theme; overview (candles + level
   ladder + context), signals inspector w/ checklist, journal forms, mistakes, memory,
   packet viewer/downloads. Read + journal only. Headless boot + AppTest execution verified.
-- Suite: **141 tests green** (sandbox py3.10; target py3.12+ per pyproject).
+- Suite: **142 tests green** on this host after packet freshness regression coverage
+  (target py3.12+ per pyproject).
 
 ## Known state / blockers
 - Live gate NOT re-run this pass: the build sandbox cannot reach TradingView Desktop's
