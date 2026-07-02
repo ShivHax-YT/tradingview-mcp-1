@@ -6,7 +6,8 @@
     copilot collect [--loop]            incremental 1m collection (+ derived TFs)
     copilot status                      DB coverage, freshness, gaps
     copilot state --symbol MNQ          structured market-state JSON from stored bars
-    copilot scan  --symbol MNQ          run strategies on stored bars -> candidates
+    copilot scan  --symbol MNQ          strategies + risk gate on stored bars
+    copilot packet [--latest]           write Claude prompt packet (JSON + Markdown)
     copilot load-fixtures <csv>         load fixture bars (tests/offline dev ONLY)
 
 This tool never places orders. LONG/SHORT/WAIT/REJECT output (later phases)
@@ -149,6 +150,23 @@ def cmd_scan(config: Config, args) -> int:
     return 0
 
 
+def cmd_packet(config: Config, args) -> int:
+    import json as _json
+
+    from .packet import build_packet, packet_from_latest, write_packet
+
+    with Store(config.db_file) as store:
+        store.init_schema()
+        packet = packet_from_latest(store, config, args.symbol)
+        jp, mp = write_packet(packet, config)
+        print(f"decision: {packet['risk_gate']['decision']}")
+        print(f"json: {jp}")
+        print(f"markdown: {mp}")
+        if args.stdout:
+            print(_json.dumps(packet, indent=2, default=str))
+    return 0
+
+
 def cmd_load_fixtures(config: Config, args) -> int:
     from .data.fixtures import load_fixture_csv
 
@@ -192,6 +210,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="full JSON output")
     p.add_argument("--no-persist", action="store_true", help="don't write scan results to the DB")
 
+    p = sub.add_parser("packet", help="build Claude prompt packet from the latest scan/signal")
+    p.add_argument("--latest", action="store_true", default=True,
+                   help="use the newest stored state+signal (default)")
+    p.add_argument("--symbol", default="MNQ")
+    p.add_argument("--stdout", action="store_true", help="also print the JSON packet")
+
     p = sub.add_parser("load-fixtures", help="load fixture CSV (tests/offline dev only)")
     p.add_argument("csv")
 
@@ -204,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "state": cmd_state,
         "scan": cmd_scan,
+        "packet": cmd_packet,
         "load-fixtures": cmd_load_fixtures,
     }
     try:

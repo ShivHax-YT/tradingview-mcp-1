@@ -209,6 +209,83 @@ class Store:
         rows = [r for r in self.latest_signals(limit=1_000_000) if r["id"] == signal_id]
         return rows[0] if rows else None
 
+
+    # -- journal (Phase 5/6): bias, mistakes, reviews ---------------------------
+    def set_daily_bias(self, trading_day: str, symbol: str, bias: str, notes: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO daily_bias (trading_day, symbol, bias, notes) VALUES (?,?,?,?) "
+            "ON CONFLICT(trading_day, symbol) DO UPDATE SET bias=excluded.bias, notes=excluded.notes",
+            (trading_day, symbol, bias, notes),
+        )
+        self.conn.commit()
+
+    def get_daily_bias(self, trading_day: str, symbol: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT trading_day, symbol, bias, notes FROM daily_bias WHERE trading_day=? AND symbol=?",
+            (trading_day, symbol),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"trading_day": row[0], "symbol": row[1], "bias": row[2], "notes": row[3]}
+
+    def add_mistake(self, tag: str, description: str = "", rule_update: str = "",
+                    applies_to: str = "") -> int:
+        cur = self.conn.execute(
+            "INSERT INTO mistakes (tag, description, rule_update, applies_to) VALUES (?,?,?,?)",
+            (tag, description, rule_update, applies_to),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_mistakes(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, tag, description, rule_update, applies_to FROM mistakes "
+            "ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        cols = ["id", "tag", "description", "rule_update", "applies_to"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def add_trade_review(self, *, signal_id: int | None, symbol: str,
+                         taken: bool, result_r: float | None = None,
+                         max_favorable_r: float | None = None, max_adverse_r: float | None = None,
+                         mistake_tags: str = "[]", notes: str = "",
+                         ts_open: int | None = None, ts_close: int | None = None,
+                         json_review: str = "{}") -> int:
+        cur = self.conn.execute(
+            """INSERT INTO trade_reviews (signal_id, symbol, ts_open, ts_close, taken,
+                                          result_r, max_favorable_r, max_adverse_r,
+                                          mistake_tags, notes, json_review)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (signal_id, symbol, ts_open, ts_close, int(taken), result_r,
+             max_favorable_r, max_adverse_r, mistake_tags, notes, json_review),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def review_for_signal(self, signal_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT id, signal_id, taken, result_r, max_favorable_r, max_adverse_r, "
+            "mistake_tags, notes FROM trade_reviews WHERE signal_id=? ORDER BY id DESC LIMIT 1",
+            (signal_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        cols = ["id", "signal_id", "taken", "result_r", "max_favorable_r", "max_adverse_r",
+                "mistake_tags", "notes"]
+        return dict(zip(cols, row))
+
+    def list_trade_reviews(self, symbol: str | None = None, limit: int = 50) -> list[dict]:
+        q = ("SELECT id, signal_id, symbol, taken, result_r, mistake_tags, notes "
+             "FROM trade_reviews")
+        params: list = []
+        if symbol is not None:
+            q += " WHERE symbol=?"
+            params.append(symbol)
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cols = ["id", "signal_id", "symbol", "taken", "result_r", "mistake_tags", "notes"]
+        return [dict(zip(cols, r)) for r in self.conn.execute(q, params).fetchall()]
+
     def gaps(self, symbol: str, timeframe: str, tf_seconds: int, max_report: int = 20) -> list[dict]:
         """Detect missing-bar gaps (ignoring gaps <= 1 bar). Market closures show up too;
         callers should interpret with session context. Honest data > pretty data."""

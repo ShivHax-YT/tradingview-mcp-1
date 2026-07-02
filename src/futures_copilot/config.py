@@ -133,6 +133,7 @@ class RiskConfig(BaseModel):
 class AppConfig(BaseModel):
     db_path: str = "data/copilot.db"
     timezone: str = "America/New_York"
+    packets_dir: str = "packets"
 
 
 class Config(BaseModel):

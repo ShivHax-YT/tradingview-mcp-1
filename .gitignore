@@ -10,3 +10,4 @@ data/*.db-wal
 data/*.db-shm
 vendor/tradingview-mcp/node_modules/
 .DS_Store
+packets/

@@ -3,6 +3,7 @@
 
 app:
   db_path: data/copilot.db
+  packets_dir: packets   # Claude prompt packets (JSON + Markdown) land here
   timezone: America/New_York   # session definitions; storage is always UTC epoch
 
 symbols:
