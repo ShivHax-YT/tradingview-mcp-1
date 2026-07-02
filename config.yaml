@@ -1,0 +1,78 @@
+# Futures AI Chart Copilot — v0.1 configuration
+# Python calculates. Claude explains. Human approves.
+
+app:
+  db_path: data/copilot.db
+  timezone: America/New_York   # session definitions; storage is always UTC epoch
+
+symbols:
+  MNQ:
+    chart_symbol: "CME_MINI:MNQ1!"   # symbol sent to TradingView Desktop
+    tick_size: 0.25
+    tick_value: 0.50                 # USD per tick per contract
+  MES:
+    chart_symbol: "CME_MINI:MES1!"
+    tick_size: 0.25
+    tick_value: 1.25
+
+# Canonical timeframes used across the app. TradingView resolution strings mapped explicitly.
+# NOTE: 4h removed from canonical — it is not backfilled and not derivable from ~8h of
+# stored 1m data. Re-add it only when the backfill actually supports it.
+timeframes:
+  canonical: ["1m", "3m", "5m", "15m", "1h"]
+  tradingview_map:
+    1m: "1"
+    3m: "3"
+    5m: "5"
+    15m: "15"
+    1h: "60"
+
+data:
+  # Product path: TradingView Desktop via tradesdontlie/tradingview-mcp (CDP :9222).
+  # Fixtures are for tests/offline dev ONLY. There is no other fallback, by design.
+  source: tvmcp
+  tvmcp:
+    node_command: node
+    server_path: vendor/tradingview-mcp/src/server.js
+    cdp_port: 9222
+    request_timeout_s: 30
+    max_bars_per_call: 500          # hard limit of data_get_ohlcv
+  backfill:
+    # data_get_ohlcv returns the NEWEST <=500 bars for the chart's active timeframe.
+    # Deep 1m history is unreachable, so backfill pulls each timeframe natively.
+    timeframes: ["1m", "5m", "15m", "1h"]
+    bars_per_timeframe: 500
+  collect:
+    timeframe: 1m                   # incremental collection is 1m-only; HTFs resampled
+    interval_s: 30                  # polling interval in --loop mode
+    drop_unclosed_last_bar: true    # last bar is forming; never store it
+
+sessions:
+  # All times America/New_York. CME trading day starts 18:00 ET the prior evening.
+  trading_day_start: "18:00"
+  maintenance_break: ["17:00", "18:00"]
+  asia:   ["18:00", "03:00"]
+  london: ["03:00", "09:30"]
+  ny:     ["09:30", "16:00"]
+  opening_range_minutes: 15
+
+features:
+  # Feature-engine parameters (used by `copilot state` and the strategy phases).
+  swing_k: 2                 # fractal half-width; a swing is confirmed k bars later
+  atr_period: 14             # Wilder ATR period
+  fvg_lookback_bars: 200     # how many recent 5m bars to scan for FVGs in market state
+  max_fvgs_in_state: 5       # cap on open/mitigated FVGs reported in market state
+  # Level resolution: session/day/prior-day levels use the finest timeframe that
+  # COVERS the window (1m -> 5m -> 15m -> 1h). Opening range is 1m-only, hardcoded.
+
+risk:
+  # Consumed by the risk/freshness gate (Phase 4). Defined now so schema/config are stable.
+  manual_approval_required: true    # hard rule, not configurable at runtime
+  auto_execution_enabled: false     # permanently false in this project
+  min_rr: 1.5
+  max_signals_per_session: 2
+  max_signals_per_day: 3
+  signal_expiry_candles: 3
+  reclaim_max_candles: 3            # spec range 3-5; start strict
+  max_stop_atr_mult: 2.0            # stop wider than N*ATR(14) rejects
+  max_entry_distance_atr_mult: 0.5  # price farther than N*ATR from entry zone = chased

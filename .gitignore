@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+vendor/tradingview-mcp/node_modules/
+.DS_Store
