@@ -11,3 +11,4 @@ data/*.db-shm
 vendor/tradingview-mcp/node_modules/
 .DS_Store
 packets/
+streamlit_dashboard.*.log

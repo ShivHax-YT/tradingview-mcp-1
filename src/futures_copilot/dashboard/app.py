@@ -15,6 +15,26 @@ from futures_copilot.dashboard import data as D
 from futures_copilot.dashboard.theme import CSS
 
 
+def _refresh_symbol(config, symbol: str) -> str:
+    """Pull fresh TradingView bars, rebuild features, and run the risk gate."""
+    from futures_copilot.data.collector import backfill
+    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
+    from futures_copilot.db.store import Store
+    from futures_copilot.gate import evaluate
+    from futures_copilot.strategies import scan
+
+    source = TradingViewMcpCandleSource(config)
+    try:
+        with Store(config.db_file) as store:
+            store.init_schema()
+            report = backfill(config, source, store, [symbol])
+            result = scan(store, config, symbol, persist=True)
+            gate = evaluate(result.state, result.candidates, store, config, persist=True)
+        return f"{report.summary()} | scan: {gate.summary()}"
+    finally:
+        source.close()
+
+
 def _candles_fig(df, state):
     """Legend-style candle chart (plotly optional — returns None if missing)."""
     try:
@@ -55,8 +75,8 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
 
     import streamlit as st
 
+    from futures_copilot.dashboard.charts import candles_fig as _candles_fig
     from futures_copilot.dashboard import data as D
-    from futures_copilot.dashboard.app import _candles_fig
     from futures_copilot.dashboard.theme import CSS
     from futures_copilot.packet import packet_from_latest, render_markdown, write_packet
 
@@ -76,9 +96,23 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
         st.markdown('<div class="subtle">Python calculates · Claude explains · you approve</div>',
                     unsafe_allow_html=True)
         st.write("")
-        symbol = st.selectbox("Symbol", list(config.symbols.keys()), index=0)
-        if st.button("↻  Refresh data", use_container_width=True):
+        symbol = st.selectbox("Symbol", list(config.symbols.keys()), index=0, key="sidebar_symbol")
+        if st.button("Refresh data", use_container_width=True, key="refresh_data"):
+            with st.spinner("Pulling TradingView bars and rescanning..."):
+                try:
+                    st.session_state["refresh_status"] = _refresh_symbol(config, symbol)
+                    st.session_state.pop("refresh_error", None)
+                except Exception as e:  # typed data-source errors include a fix hint
+                    hint = getattr(e, "hint", "")
+                    st.session_state["refresh_error"] = (
+                        f"{type(e).__name__}: {e}" + (f"\n\nFix: {hint}" if hint else "")
+                    )
+                    st.session_state.pop("refresh_status", None)
             st.rerun()
+        if msg := st.session_state.pop("refresh_status", None):
+            st.success(msg)
+        if err := st.session_state.pop("refresh_error", None):
+            st.error(err)
         st.write("")
         st.markdown(
             '<div class="safety"><b>Safety rails.</b> WAIT is the default. Decisions come from '
@@ -87,7 +121,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
 
     store = D.open_store(config)
     try:
-        ov = D.load_overview(store, symbol)
+        ov = D.load_overview(store, config, symbol)
         state = ov["state"]
         gv = D.gate_view(ov["latest_signal"])
 
@@ -226,7 +260,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     st.markdown('<div class="microlabel">Inspect signal</div>', unsafe_allow_html=True)
                     if ov["signals"]:
                         pick = st.selectbox("signal", [s["id"] for s in ov["signals"]],
-                                            format_func=lambda i: f"#{i}", label_visibility="collapsed")
+                                            format_func=lambda i: f"#{i}", label_visibility="collapsed", key="signal_pick")
                         srow = next(s for s in ov["signals"] if s["id"] == pick)
                         g = D.gate_view(srow)
                         cand = g["candidate"] or {}
@@ -264,7 +298,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     st.markdown('<div class="microlabel">Daily bias</div>', unsafe_allow_html=True)
                     with st.form("bias_form", clear_on_submit=False):
                         b_day = st.text_input("trading day", value=state["trading_day"])
-                        b_bias = st.selectbox("bias", ["bullish", "bearish", "neutral", "two_sided"])
+                        b_bias = st.selectbox("bias", ["bullish", "bearish", "neutral", "two_sided"], key="bias_select")
                         b_notes = st.text_area("thesis / notes", height=90)
                         if st.form_submit_button("Save bias"):
                             store.set_daily_bias(b_day, symbol, b_bias, b_notes)
@@ -284,12 +318,13 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                                 unsafe_allow_html=True)
                     with st.form("result_form", clear_on_submit=True):
                         sig_ids = [s["id"] for s in ov["signals"]] or [0]
-                        r_sig = st.selectbox("signal id", sig_ids, format_func=lambda i: f"#{i}")
-                        r_taken = st.toggle("I (paper) took this trade", value=True)
+                        r_sig = st.selectbox("signal id", sig_ids, format_func=lambda i: f"#{i}", key="result_signal_id")
+                        r_taken = st.toggle("I (paper) took this trade", value=True, key="result_taken")
                         r_r = st.number_input("result in R", value=0.0, step=0.1, format="%.2f")
                         r_tags = st.multiselect("mistake tags",
                                                 [m["tag"] for m in ov["mistakes"]] or
-                                                ["chased_entry", "exited_early", "moved_stop", "revenge_trade"])
+                                                ["chased_entry", "exited_early", "moved_stop", "revenge_trade"],
+                                                key="result_mistake_tags")
                         r_notes = st.text_area("review notes", height=90)
                         if st.form_submit_button("Save review"):
                             if store.get_signal(int(r_sig)) is None:
@@ -373,7 +408,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         st.download_button("Download Markdown", render_markdown(packet),
                                            file_name="copilot_packet.md", mime="text/markdown")
                     view = st.radio("view", ["markdown", "json"], horizontal=True,
-                                    label_visibility="collapsed")
+                                    label_visibility="collapsed", key="packet_view")
                     if view == "markdown":
                         st.markdown(render_markdown(packet))
                     else:

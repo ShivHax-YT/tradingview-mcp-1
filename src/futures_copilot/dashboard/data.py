@@ -15,6 +15,8 @@ from ..config import Config, load_config
 from ..db.store import Store
 from ..features.sessions import to_et
 from ..memory import similar_setups
+from ..packet.writer import _signal_is_current
+from ..strategies.liquidity_trap import TF_SECONDS
 
 
 def find_config(start: Path | None = None) -> Path:
@@ -50,17 +52,37 @@ def freshness(state_row: dict | None) -> tuple[str, int | None]:
     return ("live" if age_min <= 5 else "stale"), age_min
 
 
-def load_overview(store: Store, symbol: str) -> dict[str, Any]:
+def _candidate_is_current(row: dict[str, Any], state: dict[str, Any] | None, config: Config) -> bool:
+    """Return whether a persisted strategy output still belongs to the latest scan horizon."""
+    if not state:
+        return False
+    try:
+        cand = json.loads(row["json_output"])
+        confirmed = int(cand["confirmed_close_ts"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    horizon = int(state.get("as_of_close_ts") or state.get("ts") or 0)
+    tf_s = TF_SECONDS.get(cand.get("detection_timeframe", "5m"), 300)
+    return horizon <= confirmed + config.risk.signal_expiry_candles * tf_s
+
+
+def load_overview(store: Store, config: Config | str, symbol: str | None = None) -> dict[str, Any]:
+    if symbol is None:
+        symbol = str(config)
+        config = load_config(find_config())
     ms_row = store.latest_market_state(symbol)
     state = json.loads(ms_row["json_state"]) if ms_row else None
     sig_rows = store.latest_signals(symbol, limit=12)
-    latest_sig = sig_rows[0] if sig_rows else None
+    current_sigs = [r for r in sig_rows if state and _signal_is_current(r, state, config)]
+    latest_sig = current_sigs[0] if current_sigs else None
+    candidate_rows = store.latest_strategy_outputs(symbol, limit=8)
+    current_candidates = [r for r in candidate_rows if _candidate_is_current(r, state, config)]
     return {
         "state_row": ms_row,
         "state": state,
         "signals": sig_rows,
         "latest_signal": latest_sig,
-        "candidates": store.latest_strategy_outputs(symbol, limit=8),
+        "candidates": current_candidates,
         "coverage": [c for c in store.coverage() if c["symbol"] == symbol],
         "mistakes": store.list_mistakes(limit=12),
         "reviews": store.list_trade_reviews(symbol, limit=12),
