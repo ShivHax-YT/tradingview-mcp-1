@@ -2,6 +2,7 @@
 pure data helpers serve a seeded store. No server is started."""
 
 import pytest
+import time
 
 pytest.importorskip("streamlit")
 
@@ -85,3 +86,27 @@ def test_dashboard_executes_headless_via_apptest(config, store, tmp_path):
     assert "LONG" in md                          # decision banner rendered
     assert "Level ladder" in md
     assert len(at.tabs) >= 6
+
+
+def test_dashboard_live_mode_controls_render(config, store):
+    from streamlit.testing.v1 import AppTest
+
+    seed_long_trap(store)
+    result = scan(store, config, "MNQ", persist=True)
+    evaluate(result.state, result.candidates, store, config, persist=True)
+    config.app.db_path = str(store.db_path)
+
+    from futures_copilot.dashboard.app import main
+    at = AppTest.from_function(main)
+    at.session_state["_config"] = config
+    at.session_state["live_enabled"] = True
+    at.session_state["live_visual_interval"] = 10
+    at.session_state["live_scan_interval"] = 60
+    at.session_state["live_last_collect_ts"] = time.time()
+    at.session_state["live_status"] = "test live status"
+    at.run(timeout=60)
+
+    assert not at.exception, f"dashboard raised: {at.exception}"
+    md = " ".join(str(m.value) for m in at.markdown)
+    assert "Live Mode" in md
+    assert "test live status" in md

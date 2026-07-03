@@ -10,6 +10,7 @@ shows what Python computed and lets you journal what YOU decided.
 from __future__ import annotations
 
 import json
+import time
 
 from futures_copilot.dashboard import data as D
 from futures_copilot.dashboard.theme import CSS
@@ -33,6 +34,48 @@ def _refresh_symbol(config, symbol: str) -> str:
         return f"{report.summary()} | scan: {gate.summary()}"
     finally:
         source.close()
+
+
+def _collect_symbol(config, symbol: str) -> str:
+    """Incremental live pull: newest closed 1m bars, derived TFs, then scan/gate."""
+    from futures_copilot.data.collector import collect_once
+    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
+    from futures_copilot.db.store import Store
+    from futures_copilot.gate import evaluate
+    from futures_copilot.strategies import scan
+
+    source = TradingViewMcpCandleSource(config)
+    try:
+        with Store(config.db_file) as store:
+            store.init_schema()
+            report = collect_once(config, source, store, [symbol])
+            result = scan(store, config, symbol, persist=True)
+            gate = evaluate(result.state, result.candidates, store, config, persist=True)
+        return f"{report.summary()} | scan: {gate.summary()}"
+    finally:
+        source.close()
+
+
+def _autorefresh(seconds: int) -> None:
+    """Client-side timer: reruns the dashboard without adding Streamlit plugins."""
+    import streamlit.components.v1 as components
+
+    ms = max(1, int(seconds)) * 1000
+    components.html(
+        f"""
+        <script>
+        const key = "copilot-live-refresh";
+        if (window.parent[key]) {{
+          window.parent.clearTimeout(window.parent[key]);
+        }}
+        window.parent[key] = window.parent.setTimeout(() => {{
+          window.parent.location.reload();
+        }}, {ms});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def _candles_fig(df, state):
@@ -72,6 +115,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
     # Imports live INSIDE main so streamlit's AppTest.from_function can execute
     # it in a fresh module (module globals are not carried over there).
     import json
+    import time
 
     import streamlit as st
 
@@ -97,10 +141,61 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     unsafe_allow_html=True)
         st.write("")
         symbol = st.selectbox("Symbol", list(config.symbols.keys()), index=0, key="sidebar_symbol")
+        live_enabled = st.toggle("Live mode", value=False, key="live_enabled")
+        if live_enabled:
+            visual_interval = st.select_slider(
+                "screen update",
+                options=[1, 3, 5, 10],
+                value=3,
+                format_func=lambda s: f"{s}s",
+                key="live_visual_interval",
+            )
+            scan_interval = st.select_slider(
+                "data scan",
+                options=[10, 15, 30, 60],
+                value=30,
+                format_func=lambda s: f"{s}s",
+                key="live_scan_interval",
+            )
+            @st.fragment(run_every=f"{int(visual_interval)}s")
+            def live_mode_tick() -> None:
+                now = time.time()
+                last_collect = float(st.session_state.get("live_last_collect_ts", 0.0))
+                next_collect_in = max(0, int(scan_interval - (now - last_collect)))
+                if now - last_collect >= scan_interval:
+                    with st.spinner("Live Mode: collecting closed 1m bars and rescanning..."):
+                        try:
+                            st.session_state["live_status"] = _collect_symbol(config, symbol)
+                            st.session_state["live_last_collect_ts"] = time.time()
+                            st.session_state["live_error"] = None
+                        except Exception as e:
+                            hint = getattr(e, "hint", "")
+                            st.session_state["live_error"] = (
+                                f"{type(e).__name__}: {e}" + (f"\n\nFix: {hint}" if hint else "")
+                            )
+                            st.session_state["live_last_collect_ts"] = time.time()
+                    st.rerun()
+
+                live_error = st.session_state.get("live_error")
+                live_status = st.session_state.get("live_status", "warming up")
+                state_class = "error" if live_error else "ok"
+                detail = live_error or live_status
+                st.markdown(
+                    f'<div class="live-card {state_class}">'
+                    '<div class="live-top"><span class="live-pulse"></span><b>Live Mode</b>'
+                    f'<span>{next_collect_in}s</span></div>'
+                    f'<div class="live-detail">{detail}</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+            live_mode_tick()
         if st.button("Refresh data", use_container_width=True, key="refresh_data"):
             with st.spinner("Pulling TradingView bars and rescanning..."):
                 try:
                     st.session_state["refresh_status"] = _refresh_symbol(config, symbol)
+                    st.session_state["live_status"] = st.session_state["refresh_status"]
+                    st.session_state["live_last_collect_ts"] = time.time()
                     st.session_state.pop("refresh_error", None)
                 except Exception as e:  # typed data-source errors include a fix hint
                     hint = getattr(e, "hint", "")

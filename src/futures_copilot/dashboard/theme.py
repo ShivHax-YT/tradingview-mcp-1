@@ -61,6 +61,38 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: .35rem .45rem; 
 .chip.amber .dot { background: #ffb224; box-shadow: 0 0 8px rgba(255,178,36,.7); }
 .chip.gray .dot { background: #5b6270; }
 
+/* live mode status */
+.live-card {
+  margin: .6rem 0 .3rem; border: 1px solid rgba(0,200,5,.28);
+  background: linear-gradient(180deg, rgba(0,200,5,.10), rgba(0,200,5,.035));
+  border-radius: 10px; padding: .65rem .75rem; color: #c9cdd6;
+  box-shadow: 0 0 22px rgba(0,200,5,.08);
+}
+.live-card.error {
+  border-color: rgba(255,80,0,.36);
+  background: linear-gradient(180deg, rgba(255,80,0,.11), rgba(255,80,0,.035));
+  box-shadow: 0 0 22px rgba(255,80,0,.08);
+}
+.live-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.live-top b { color: #e8eaed; font-size: .82rem; letter-spacing: .03em; }
+.live-top span:last-child { color: #8b919e; font-size: .75rem; font-weight: 700; }
+.live-detail { color: #8b919e; font-size: .72rem; line-height: 1.45; margin-top: .4rem; white-space: pre-wrap; }
+.live-pulse {
+  width: 9px; height: 9px; border-radius: 50%; background: #00c805;
+  box-shadow: 0 0 0 rgba(0,200,5,.65); animation: livePulse 1.2s infinite;
+}
+.live-card.error .live-pulse { background: #ff5000; animation-name: livePulseRed; }
+@keyframes livePulse {
+  0% { box-shadow: 0 0 0 0 rgba(0,200,5,.65); transform: scale(.94); }
+  70% { box-shadow: 0 0 0 10px rgba(0,200,5,0); transform: scale(1); }
+  100% { box-shadow: 0 0 0 0 rgba(0,200,5,0); transform: scale(.94); }
+}
+@keyframes livePulseRed {
+  0% { box-shadow: 0 0 0 0 rgba(255,80,0,.65); transform: scale(.94); }
+  70% { box-shadow: 0 0 0 10px rgba(255,80,0,0); transform: scale(1); }
+  100% { box-shadow: 0 0 0 0 rgba(255,80,0,0); transform: scale(.94); }
+}
+
 /* ── decision banner ── */
 .decision {
   border-radius: 12px; padding: .9rem 1.1rem; font-weight: 800; font-size: 1.15rem;
