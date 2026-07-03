@@ -56,6 +56,25 @@ def _collect_symbol(config, symbol: str) -> str:
         source.close()
 
 
+def _quote_symbol(config, symbol: str) -> dict:
+    """Fast read of the forming 1m chart price. This is display-only."""
+    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
+
+    source = TradingViewMcpCandleSource(config)
+    try:
+        q = source.get_quote(symbol)
+        price = q.get("header_price") or q.get("last") or q.get("close")
+        return {
+            "symbol": symbol,
+            "price": float(price),
+            "quote_time": q.get("time"),
+            "synced_at": time.time(),
+            "source": "TradingView quote_get",
+        }
+    finally:
+        source.close()
+
+
 def _autorefresh(seconds: int) -> None:
     """Client-side timer: reruns the dashboard without adding Streamlit plugins."""
     import streamlit.components.v1 as components
@@ -116,6 +135,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
     # it in a fresh module (module globals are not carried over there).
     import json
     import time
+    from html import escape
 
     import streamlit as st
 
@@ -141,8 +161,21 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     unsafe_allow_html=True)
         st.write("")
         symbol = st.selectbox("Symbol", list(config.symbols.keys()), index=0, key="sidebar_symbol")
+        chart_tf = st.selectbox(
+            "Chart timeframe",
+            list(config.timeframes.canonical),
+            index=list(config.timeframes.canonical).index("1m"),
+            key="chart_timeframe",
+        )
         live_enabled = st.toggle("Live mode", value=False, key="live_enabled")
         if live_enabled:
+            price_interval = st.select_slider(
+                "price sync",
+                options=[1, 2, 3, 5],
+                value=1,
+                format_func=lambda s: f"{s}s",
+                key="live_price_interval",
+            )
             visual_interval = st.select_slider(
                 "screen update",
                 options=[1, 3, 5, 10],
@@ -160,30 +193,52 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             @st.fragment(run_every=f"{int(visual_interval)}s")
             def live_mode_tick() -> None:
                 now = time.time()
+                last_quote = float(st.session_state.get("live_last_quote_ts", 0.0))
                 last_collect = float(st.session_state.get("live_last_collect_ts", 0.0))
+                next_quote_in = max(0, int(price_interval - (now - last_quote)))
                 next_collect_in = max(0, int(scan_interval - (now - last_collect)))
+                changed = False
+                if now - last_quote >= price_interval:
+                    try:
+                        st.session_state["live_quote"] = _quote_symbol(config, symbol)
+                        st.session_state["live_last_quote_ts"] = time.time()
+                        st.session_state["live_quote_error"] = None
+                        changed = True
+                    except Exception as e:
+                        hint = getattr(e, "hint", "")
+                        st.session_state["live_quote_error"] = (
+                            f"{type(e).__name__}: {e}" + (f"\n\nFix: {hint}" if hint else "")
+                        )
+                        st.session_state["live_last_quote_ts"] = time.time()
                 if now - last_collect >= scan_interval:
                     with st.spinner("Live Mode: collecting closed 1m bars and rescanning..."):
                         try:
                             st.session_state["live_status"] = _collect_symbol(config, symbol)
                             st.session_state["live_last_collect_ts"] = time.time()
                             st.session_state["live_error"] = None
+                            changed = True
                         except Exception as e:
                             hint = getattr(e, "hint", "")
                             st.session_state["live_error"] = (
                                 f"{type(e).__name__}: {e}" + (f"\n\nFix: {hint}" if hint else "")
                             )
                             st.session_state["live_last_collect_ts"] = time.time()
+                if changed:
                     st.rerun()
 
-                live_error = st.session_state.get("live_error")
+                live_error = st.session_state.get("live_quote_error") or st.session_state.get("live_error")
                 live_status = st.session_state.get("live_status", "warming up")
                 state_class = "error" if live_error else "ok"
-                detail = live_error or live_status
+                quote = st.session_state.get("live_quote") or {}
+                quote_txt = (
+                    f'price {quote.get("price", 0):,.2f} synced {int(max(0, time.time() - quote.get("synced_at", time.time())))}s ago'
+                    if quote else "price sync warming up"
+                )
+                detail = escape(live_error or f"{quote_txt}\n{live_status}")
                 st.markdown(
                     f'<div class="live-card {state_class}">'
                     '<div class="live-top"><span class="live-pulse"></span><b>Live Mode</b>'
-                    f'<span>{next_collect_in}s</span></div>'
+                    f'<span>price {next_quote_in}s · scan {next_collect_in}s</span></div>'
                     f'<div class="live-detail">{detail}</div>'
                     '</div>',
                     unsafe_allow_html=True,
@@ -219,13 +274,20 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
         ov = D.load_overview(store, config, symbol)
         state = ov["state"]
         gv = D.gate_view(ov["latest_signal"])
+        live_quote = st.session_state.get("live_quote") or {}
+        quote_age = time.time() - float(live_quote.get("synced_at", 0.0))
+        quote_is_fresh = live_quote.get("symbol") == symbol and quote_age <= 10
+        display_price = float(live_quote["price"]) if state and quote_is_fresh else (
+            float(state["current_price"]) if state else None
+        )
+        live_badge = '<span class="price-live">LIVE</span>' if quote_is_fresh else ""
 
         # ── header strip ─────────────────────────────────────────────────────
         h1, h2, h3, h4 = st.columns([2.4, 1.6, 1.6, 3.2])
         with h1:
             if state:
                 st.markdown(f'<div class="microlabel">{symbol} · {state["trading_day"]}</div>'
-                            f'<div class="bigprice">{state["current_price"]:,.2f}</div>',
+                            f'<div class="bigprice">{display_price:,.2f}{live_badge}</div>',
                             unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="microlabel">{symbol}</div>'
@@ -265,8 +327,8 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             left, right = st.columns([2.5, 1.25], gap="small")
             with left:
                 with st.container(border=True):
-                    st.markdown('<div class="microlabel">Price · 5m</div>', unsafe_allow_html=True)
-                    df5 = store.get_candles_df(symbol, "5m", limit=180)
+                    st.markdown(f'<div class="microlabel">Price · {chart_tf}</div>', unsafe_allow_html=True)
+                    df5 = store.get_candles_df(symbol, chart_tf, limit=240 if chart_tf == "1m" else 180)
                     fig = _candles_fig(df5, state)
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True,
@@ -298,7 +360,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             with right:
                 with st.container(border=True):
                     st.markdown('<div class="microlabel">Level ladder</div>', unsafe_allow_html=True)
-                    px = state["current_price"]
+                    px = display_price if display_price is not None else state["current_price"]
                     rows = D.levels_ladder(state)
                     shown_px = False
                     for name, lvl, src in rows:

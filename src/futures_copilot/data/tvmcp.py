@@ -44,6 +44,7 @@ ALLOWED_TOOLS = {
     "chart_set_symbol",
     "chart_set_timeframe",
     "data_get_ohlcv",
+    "quote_get",
     "symbol_info",
 }
 
@@ -247,3 +248,12 @@ class TradingViewMcpCandleSource(CandleSource):
         if self.config.data.collect.drop_unclosed_last_bar and candles:
             candles = candles[:-1]  # newest bar is still forming on a live chart
         return candles[-count:]
+
+    def get_quote(self, symbol: str) -> dict:
+        """Read the current 1m chart quote without storing the forming bar."""
+        self.ensure_chart(symbol, self.config.data.collect.timeframe)
+        payload = self._call("quote_get")
+        for key in ("time",):
+            if payload.get(key) is not None:
+                payload[key] = _normalize_epoch_seconds(payload[key])
+        return payload

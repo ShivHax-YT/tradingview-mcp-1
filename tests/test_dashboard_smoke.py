@@ -101,8 +101,11 @@ def test_dashboard_live_mode_controls_render(config, store):
     at.session_state["_config"] = config
     at.session_state["live_enabled"] = True
     at.session_state["live_visual_interval"] = 10
+    at.session_state["live_price_interval"] = 5
     at.session_state["live_scan_interval"] = 60
+    at.session_state["live_last_quote_ts"] = time.time()
     at.session_state["live_last_collect_ts"] = time.time()
+    at.session_state["live_quote"] = {"symbol": "MNQ", "price": 30100.0, "synced_at": time.time()}
     at.session_state["live_status"] = "test live status"
     at.run(timeout=60)
 

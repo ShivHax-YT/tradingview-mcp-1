@@ -43,6 +43,12 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: .35rem .45rem; 
 .copilot-brand { font-weight: 800; font-size: 1.05rem; letter-spacing: -.01em; color: #e8eaed; }
 .copilot-brand .tick { color: #00c805; }
 .bigprice { font-size: 2.1rem; font-weight: 800; letter-spacing: -.02em; line-height: 1; }
+.price-live {
+  display: inline-flex; vertical-align: middle; margin-left: .55rem; transform: translateY(-.18rem);
+  border: 1px solid rgba(0,200,5,.35); border-radius: 999px; padding: .12rem .42rem;
+  color: #46e264; background: rgba(0,200,5,.08); font-size: .62rem; font-weight: 800;
+  letter-spacing: .08em;
+}
 .subtle { color: #8b919e; font-size: .8rem; }
 
 /* ── chips ── */
