@@ -1,5 +1,42 @@
 # Progress
 
+## Done (Desk Memory / Preflight v0.3, 2026-07-05)
+- **Preflight module** (`preflight.py`): deterministic journal memory — recent
+  reviews joined to signals (`Store.reviews_with_signals`) + mistake ledger →
+  compact JSON cache `data/session_memory/SYMBOL_DAY.json` (performance
+  summary, top mistake tags, do-not-repeat rules, setup groups gated by
+  `min_samples_for_pattern`, governor snapshot, warning/packet bullets).
+  Statistics and reminders, NOT model training; zero decision authority.
+- **CLI**: `copilot preflight --symbol MNQ [--day D]` — SQLite only, works
+  without TradingView. Config section `preflight:` (lookbacks, caps).
+- **Dashboard**: Desk Reminders panel above the Desk Mode strip — cache
+  status (cached/stale/missing), top mistakes, performance + governor-at-build,
+  warning bullets, local-only "Refresh preflight memory" button. Staleness =
+  two MAX(id) lookups per refresh; journaling flips the panel to stale.
+- **Packet**: `preflight_memory` embedded when present + "Desk Memory /
+  Preflight" markdown section; Claude/Fable output schema still decision-free.
+- **Boundary test**: live scan/gate path proven (subprocess test) to never
+  import preflight. Docs: `docs/DESK_MEMORY.md`.
+
+## Done (Desk Mode v0.2, 2026-07-05)
+- **Risk config**: golden hour (enforce + window), trade governor (stop on first
+  win / stop after N losses), equal-level stop-magnet filter (ticks tolerance,
+  lookback), `allowed_sessions` default now `["ny"]`; `vault` config for prep.
+- **Risk gate**: three new checklist items — `golden_hour_allowed` (09:30 incl /
+  11:00 excl ET at the market-state horizon), `trade_governor_clear` (journaled
+  wins/losses via `Store.day_trade_results`), `stop_not_at_equal_liquidity`
+  (`features/equal_levels.py`, closed bars only, ≥2 matches to reject).
+- **IFVG evidence**: liquidity trap tags `ifvg_inversion` confluence when an
+  opposite-kind FVG body-closes through after the sweep (existing lifecycle) —
+  evidence only, no gate, no new strategy module. SMT stays out of v0.2.
+- **Session prep**: `copilot prep --symbol MNQ --day YYYY-MM-DD` caches a fixed
+  5-note vault allowlist to `data/session_prep/`; packet embeds it if present;
+  scan/gate/dashboard never read the vault (live latency rule).
+- **Dashboard**: Desk Mode strip — trade plan (entry/stop/target/invalidation/
+  reject reasons), gates (golden hour, governor, equal-level), ops (packet
+  readiness, prep cache, closed-candle scan vs live quote sync). Still zero
+  execution controls. See `docs/DESK_MODE.md`.
+
 ## Done
 - **Phase 0/1 — scaffold + data layer** (2026-07-02): config+validators, typed errors,
   SQLite store/schema, tvmcp adapter (read-only allowlist), backfill/collect/resample,

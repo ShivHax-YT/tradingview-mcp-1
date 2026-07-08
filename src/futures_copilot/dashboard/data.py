@@ -90,6 +90,72 @@ def load_overview(store: Store, config: Config | str, symbol: str | None = None)
     }
 
 
+def desk_mode_status(store: Store, config: Config, state: dict | None) -> dict[str, Any]:
+    """Desk Mode panel data: golden hour, trade governor, prep cache, packet
+    readiness inputs. Purely local reads (SQLite + one file-exists check) —
+    never the vault contents, never the network, never Claude. Judged at the
+    market state's as_of_close_ts, same clock as the risk gate."""
+    from ..gate import golden_hour_status, trade_governor_status
+    from ..prep import prep_cache_path
+
+    if not state:
+        return {"golden_hour": None, "governor": None, "prep": None}
+    symbol = state.get("symbol", "MNQ")
+    day = state.get("trading_day")
+    horizon = int(state.get("as_of_close_ts") or state.get("ts") or 0)
+    within, gh_detail = golden_hour_status(config, horizon)
+    clear, gov_detail, counts = trade_governor_status(store, config, symbol, day)
+    prep_path = prep_cache_path(config, symbol, day) if day else None
+    return {
+        "golden_hour": {
+            "enforced": config.risk.enforce_golden_hour,
+            "within": within,
+            "window": list(config.risk.golden_hour),
+            "detail": gh_detail,
+        },
+        "governor": {"clear": clear, "detail": gov_detail, **counts},
+        "prep": {
+            "exists": bool(prep_path and prep_path.exists()),
+            "path": str(prep_path) if prep_path else None,
+        },
+    }
+
+
+def preflight_view(store: Store, config: Config, symbol: str,
+                   state: dict | None) -> dict[str, Any]:
+    """Desk Reminders panel data. Reads ONLY the local preflight cache plus two
+    cheap MAX(id) lookups for staleness — no summarization per refresh, no
+    TradingView, no Obsidian, no Claude.
+    status: 'cached' | 'stale' | 'missing' | 'disabled'."""
+    from ..preflight import load_preflight, preflight_is_stale
+
+    if not config.preflight.enabled:
+        return {"status": "disabled", "cache": None}
+    day = (state or {}).get("trading_day")
+    cache = load_preflight(config, symbol, day)
+    if cache is None:
+        return {"status": "missing", "cache": None}
+    status = "stale" if preflight_is_stale(store, cache) else "cached"
+    return {"status": status, "cache": cache}
+
+
+def rebuild_preflight(store: Store, config: Config, symbol: str, day: str) -> str:
+    """Dashboard refresh button: rebuild the LOCAL cache only. SQLite in, JSON
+    out — touches nothing else, decides nothing."""
+    from ..preflight import build_preflight, write_preflight
+
+    path = write_preflight(build_preflight(store, config, symbol, day), config)
+    return str(path)
+
+
+def checklist_item(gv: dict, name: str) -> dict | None:
+    """Find one named check in a gate view's checklist (None if not gated yet)."""
+    for c in gv.get("checklist") or []:
+        if c.get("check") == name:
+            return c
+    return None
+
+
 def gate_view(sig_row: dict | None) -> dict[str, Any]:
     """Signal row -> {decision, checklist, reasons, warnings, invalidation, candidate}."""
     if not sig_row:

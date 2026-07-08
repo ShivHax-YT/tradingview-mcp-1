@@ -32,11 +32,16 @@ vendor\tradingview-mcp\scripts\launch_tv_debug.bat
 .venv\Scripts\copilot state --symbol MNQ     :: market-state JSON (levels + provenance)
 .venv\Scripts\copilot scan  --symbol MNQ     :: strategies + risk gate
 .venv\Scripts\copilot packet --latest        :: Claude packet (JSON + Markdown)
+.venv\Scripts\copilot prep --symbol MNQ      :: cache vault notes for the day (optional)
+.venv\Scripts\copilot preflight --symbol MNQ :: desk-memory cache from your journal
 .venv\Scripts\copilot journal show           :: journal state
 .venv\Scripts\copilot dashboard              :: local Streamlit dashboard
 ```
 
-Tests: `.venv\Scripts\python.exe -m pytest -q` (142 tests).
+Tests: `.venv\Scripts\python.exe -m pytest -q` (174 tests).
+
+Desk Mode v0.2 (golden hour, trade governor, equal-level stop filter, vault
+prep cache): see `docs/DESK_MODE.md`.
 
 ## What's inside
 
@@ -61,4 +66,4 @@ Tests: `.venv\Scripts\python.exe -m pytest -q` (142 tests).
 - fixtures carry `source='fixture'` and are never a live fallback
 - levels are never fabricated: window not covered by any timeframe ⇒ `null` + `level_sources` says which TF produced each level
 
-Docs: `docs/ARCHITECTURE.md` · `docs/SAFETY.md` · `docs/TESTING.md` · `docs/PROGRESS.md` · per-feature state in `features_status.json`.
+Docs: `docs/ARCHITECTURE.md` · `docs/SAFETY.md` · `docs/TESTING.md` · `docs/PROGRESS.md` · `docs/DESK_MODE.md` · `docs/DESK_MEMORY.md` · per-feature state in `features_status.json`.

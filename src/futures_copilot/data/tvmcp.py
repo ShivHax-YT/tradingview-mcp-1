@@ -33,6 +33,7 @@ from ..errors import (
     UnsupportedTimeframe,
 )
 from ..models import Candle
+from ..utils.symbols import normalize_symbol
 from .base import CandleSource
 
 # Explicit allowlist: every bridge tool this adapter is permitted to call.
@@ -58,6 +59,11 @@ def _normalize_epoch_seconds(t: float | int) -> int:
 def _symbol_root(chart_symbol: str) -> str:
     """'CME_MINI:MNQ1!' -> 'MNQ1!' for tolerant comparison with chart state."""
     return chart_symbol.split(":")[-1].strip().upper()
+
+
+def _canonical_symbol_root(chart_symbol: str) -> str:
+    """'CME_MINI:MNQ1!' -> 'MNQ' for exact root comparison."""
+    return normalize_symbol(chart_symbol)
 
 
 class TradingViewMcpCandleSource(CandleSource):
@@ -191,22 +197,24 @@ class TradingViewMcpCandleSource(CandleSource):
         """Point the chart at (symbol, timeframe) and VERIFY it took effect."""
         chart_symbol = self._chart_symbol_for(symbol)
         resolution = self._resolution_for(timeframe)
-        want_root = _symbol_root(chart_symbol)
+        want_root = _canonical_symbol_root(chart_symbol)
 
         state = self._call("chart_get_state")
-        cur_symbol = str(state.get("symbol", "")).upper()
+        cur_symbol = str(state.get("symbol", ""))
+        cur_root = _canonical_symbol_root(cur_symbol)
         cur_res = str(state.get("resolution", ""))
 
-        if want_root not in cur_symbol:
+        if cur_root != want_root:
             self._call("chart_set_symbol", {"symbol": chart_symbol})
         if cur_res != resolution:
             self._call("chart_set_timeframe", {"timeframe": resolution})
 
         # Re-verify: never trust a set-call blindly.
         state = self._call("chart_get_state")
-        got_symbol = str(state.get("symbol", "")).upper()
+        got_symbol = str(state.get("symbol", ""))
+        got_root = _canonical_symbol_root(got_symbol)
         got_res = str(state.get("resolution", ""))
-        if want_root not in got_symbol or got_res != resolution:
+        if got_root != want_root or got_res != resolution:
             raise SymbolMismatch(
                 f"chart is on ({got_symbol}, {got_res}), wanted ({want_root}, {resolution}); "
                 "refusing to read bars",

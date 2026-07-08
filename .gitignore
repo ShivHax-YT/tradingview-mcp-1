@@ -8,6 +8,9 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/session_memory/
+data/session_prep/
+data/vector_memory/
 vendor/tradingview-mcp/node_modules/
 .DS_Store
 packets/

@@ -135,14 +135,21 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
     # it in a fresh module (module globals are not carried over there).
     import json
     import time
+    from datetime import date, timedelta
     from html import escape
 
     import streamlit as st
 
     from futures_copilot.dashboard.charts import candles_fig as _candles_fig
     from futures_copilot.dashboard import data as D
+    from futures_copilot.dashboard.safe_html import h
     from futures_copilot.dashboard.theme import CSS
-    from futures_copilot.packet import packet_from_latest, render_markdown, write_packet
+    from futures_copilot.packet import (
+        export_packet_json, packet_from_latest, render_markdown, write_packet,
+    )
+    from futures_copilot.utils.roll_dates import (
+        ROLL_WINDOW_DAYS, get_next_roll_date, is_in_roll_window,
+    )
 
     st.set_page_config(page_title="Futures Copilot", page_icon="◮", layout="wide",
                        initial_sidebar_state="expanded")
@@ -310,14 +317,183 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             sub = ""
             if gv["candidate"]:
                 c = gv["candidate"]
-                sub = (f'<span class="sub">{c.get("setup_type")} · grade {c.get("grade")} · '
-                       f'RR {c.get("rr", 0):.2f} · {D.fmt_ts(c.get("confirmed_close_ts"))}</span>')
+                sub = (f'<span class="sub">{h(c.get("setup_type"))} · grade {h(c.get("grade"))} · '
+                       f'RR {c.get("rr", 0):.2f} · {h(D.fmt_ts(c.get("confirmed_close_ts")))}</span>')
             st.markdown(f'<div class="decision {dec}">{dec}{sub}</div>', unsafe_allow_html=True)
+
+        # ── contract roll indicator ──────────────────────────────────────
+        # Static CME calendar (utils/roll_dates.py). Display only — this banner
+        # never gates anything in code; it reminds the human. Anchored to the
+        # trading day on screen, falling back to today before the first scan.
+        roll_day = date.fromisoformat(state["trading_day"]) if state else date.today()
+        next_roll = get_next_roll_date(roll_day)
+        window_opens = (next_roll - timedelta(days=ROLL_WINDOW_DAYS)) if next_roll else None
+        if is_in_roll_window(roll_day):
+            st.error("🚨 ROLL WINDOW ACTIVE — No trades allowed.")
+        elif window_opens is not None and (window_opens - roll_day) <= timedelta(hours=48):
+            st.warning("⚠️ Roll window approaching within 48 hours. "
+                       "Monitor contract volume shift.")
+        else:
+            st.caption("✅ Normal contract cycle trading.")
 
         if not state:
             st.info("No market state yet. Run `copilot backfill` then `copilot scan --symbol "
                     f"{symbol}` and refresh.")
             return
+
+        # ── Desk Reminders: preflight journal memory. Reads ONLY the local
+        # cache (+ two cheap MAX(id) staleness lookups). Journaling in the
+        # forms below flips this to 'stale'; the refresh button rebuilds the
+        # LOCAL cache and nothing else. ─────────────────────────────────────
+        st.write("")
+        pf = D.preflight_view(store, config, symbol, state)
+        with st.container(border=True):
+            r1, r2 = st.columns([2.0, 3.8], gap="small")
+            with r1:
+                st.markdown('<div class="microlabel">Desk Reminders · journal memory</div>',
+                            unsafe_allow_html=True)
+                pf_chip, pf_txt = {
+                    "cached": ("green", "cached"),
+                    "stale": ("amber", "stale — journal changed"),
+                    "missing": ("gray", "missing"),
+                    "disabled": ("gray", "disabled"),
+                }.get(pf["status"], ("gray", pf["status"]))
+                st.markdown(f'<div class="stat"><span class="k">preflight cache</span>'
+                            f'<span class="v"><span class="chip {pf_chip}"><span class="dot"></span>'
+                            f'{pf_txt}</span></span></div>', unsafe_allow_html=True)
+                mem = pf["cache"]
+                if mem:
+                    perf = mem.get("performance") or {}
+                    avg = perf.get("avg_result_r")
+                    st.markdown(
+                        f'<div class="stat"><span class="k">last {perf.get("total_reviewed", 0)} reviews</span>'
+                        f'<span class="v">{perf.get("wins", 0)}W / {perf.get("losses", 0)}L / '
+                        f'{perf.get("scratches", 0)} scratch · {perf.get("skipped", 0)} skipped'
+                        f'{f" · avg {avg:+.2f}R" if avg is not None else ""}</span></div>',
+                        unsafe_allow_html=True)
+                    gov_m = mem.get("governor") or {}
+                    if gov_m:
+                        tone = "green" if gov_m.get("clear") else "red"
+                        st.markdown(f'<div class="stat"><span class="k">governor at build</span>'
+                                    f'<span class="v {tone}">'
+                                    f'{"clear" if gov_m.get("clear") else "done for the day"} · '
+                                    f'{gov_m.get("wins", 0)}W / {gov_m.get("losses", 0)}L</span></div>',
+                                    unsafe_allow_html=True)
+                    for t in (mem.get("top_mistake_tags") or [])[:5]:
+                        st.markdown(f'<div class="stat"><span class="k">mistake</span>'
+                                    f'<span class="v"><b>{h(t.get("tag"))}</b> ×{h(t.get("count"))}'
+                                    f'</span></div>', unsafe_allow_html=True)
+            with r2:
+                st.markdown('<div class="microlabel">Do-not-repeat reminders</div>',
+                            unsafe_allow_html=True)
+                mem = pf["cache"]
+                if mem:
+                    bullets = (mem.get("warnings") or [])[:5]
+                    if bullets:
+                        for w in bullets:
+                            st.markdown(f'<div class="stat"><span class="k">! {h(w)}</span></div>',
+                                        unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="stat"><span class="k">no repeated-mistake patterns '
+                                    'in the lookback window</span><span class="v muted">keep journaling'
+                                    '</span></div>', unsafe_allow_html=True)
+                    for rl in (mem.get("mistake_rules") or [])[:3]:
+                        st.markdown(f'<div class="stat"><span class="k">rule [{h(rl.get("tag"))}]</span>'
+                                    f'<span class="v">{h(rl.get("rule"))}</span></div>',
+                                    unsafe_allow_html=True)
+                elif pf["status"] == "missing":
+                    st.markdown('<div class="stat"><span class="k">no desk-memory cache for '
+                                f'{state["trading_day"]}</span><span class="v muted">run '
+                                '<code>copilot preflight</code> before the session</span></div>',
+                                unsafe_allow_html=True)
+                if pf["status"] in ("missing", "stale"):
+                    if st.button("Refresh preflight memory", key="refresh_preflight",
+                                 help="Rebuilds the local journal-memory cache from SQLite. "
+                                      "Touches nothing else — no TradingView, no Obsidian, no Claude."):
+                        D.rebuild_preflight(store, config, symbol, state["trading_day"])
+                        st.rerun()
+
+        # ── Desk Mode strip: plan + gates + ops. Everything here comes from the
+        # closed-candle scan, the risk gate, and cheap local reads. It never
+        # waits on Claude/Fable or the Obsidian vault. ──────────────────────
+        st.write("")
+        desk = D.desk_mode_status(store, config, state)
+        d1, d2, d3 = st.columns([2.2, 1.9, 1.7], gap="small")
+        with d1:
+            with st.container(border=True):
+                st.markdown('<div class="microlabel">Desk Mode · trade plan (manual paper only)</div>',
+                            unsafe_allow_html=True)
+                cand = gv["candidate"]
+                if cand:
+                    st.markdown(
+                        f'<div class="stat"><span class="k">entry zone</span><span class="v">'
+                        f'{h(cand.get("entry_lo"))} – {h(cand.get("entry_hi"))} (ref {h(cand.get("entry_ref"))})'
+                        f'</span></div>'
+                        f'<div class="stat"><span class="k">stop</span><span class="v">{h(cand.get("stop"))}</span></div>'
+                        f'<div class="stat"><span class="k">target</span><span class="v">'
+                        f'{h(cand.get("target"))} ({h(cand.get("target_name"))}) · RR {cand.get("rr", 0):.2f}</span></div>',
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="stat"><span class="k">no current candidate</span>'
+                                '<span class="v muted">WAIT is the default</span></div>',
+                                unsafe_allow_html=True)
+                for inv in (gv["invalidation"] or [])[:3]:
+                    st.markdown(f'<div class="stat"><span class="k">✕ {h(inv)}</span></div>',
+                                unsafe_allow_html=True)
+                for rr_ in (gv["reasons"] or [])[:4]:
+                    st.markdown(f'<div class="stat"><span class="k">reject</span>'
+                                f'<span class="v red">{h(rr_)}</span></div>', unsafe_allow_html=True)
+        with d2:
+            with st.container(border=True):
+                st.markdown('<div class="microlabel">Desk Mode · gates</div>', unsafe_allow_html=True)
+                gh = desk.get("golden_hour") or {}
+                if not gh:
+                    gh_chip, gh_txt = "gray", "unknown"
+                elif not gh.get("enforced"):
+                    gh_chip, gh_txt = "gray", "off"
+                elif gh.get("within"):
+                    gh_chip, gh_txt = "green", f'inside {gh["window"][0]}–{gh["window"][1]}'
+                else:
+                    gh_chip, gh_txt = "red", f'outside {gh["window"][0]}–{gh["window"][1]}'
+                st.markdown(f'<div class="stat"><span class="k">golden hour</span>'
+                            f'<span class="v"><span class="chip {gh_chip}"><span class="dot"></span>'
+                            f'{gh_txt}</span></span></div>', unsafe_allow_html=True)
+                gov = desk.get("governor") or {}
+                gov_chip = "green" if gov.get("clear") else "red"
+                gov_txt = ("clear" if gov.get("clear") else "done for the day")
+                st.markdown(f'<div class="stat"><span class="k">trade governor</span>'
+                            f'<span class="v"><span class="chip {gov_chip}"><span class="dot"></span>'
+                            f'{gov_txt}</span> {gov.get("wins", 0)}W / {gov.get("losses", 0)}L</span></div>',
+                            unsafe_allow_html=True)
+                eq = D.checklist_item(gv, "stop_not_at_equal_liquidity")
+                if eq is None:
+                    eq_chip, eq_txt = "gray", "not gated yet"
+                elif eq.get("passed"):
+                    eq_chip, eq_txt = "green", "stop clear"
+                else:
+                    eq_chip, eq_txt = "red", "stop at equal highs/lows"
+                st.markdown(f'<div class="stat"><span class="k">equal-level stop</span>'
+                            f'<span class="v"><span class="chip {eq_chip}"><span class="dot"></span>'
+                            f'{eq_txt}</span></span></div>', unsafe_allow_html=True)
+        with d3:
+            with st.container(border=True):
+                st.markdown('<div class="microlabel">Desk Mode · ops</div>', unsafe_allow_html=True)
+                pkt_ready = gv["candidate"] is not None or gv["decision"] != "WAIT"
+                st.markdown(f'<div class="stat"><span class="k">packet</span>'
+                            f'<span class="v">{"signal packet ready" if pkt_ready else "WAIT packet"}'
+                            f'</span></div>', unsafe_allow_html=True)
+                prep = desk.get("prep") or {}
+                st.markdown(f'<div class="stat"><span class="k">vault prep cache</span>'
+                            f'<span class="v">{"cached" if prep.get("exists") else "none — optional, run `copilot prep`"}'
+                            f'</span></div>', unsafe_allow_html=True)
+                fresh2, age2 = D.freshness(ov["state_row"])
+                st.markdown(f'<div class="stat"><span class="k">closed-candle scan</span>'
+                            f'<span class="v">{fresh2}{f" · {age2}m old" if age2 is not None else ""}'
+                            f'</span></div>', unsafe_allow_html=True)
+                q_txt = (f'{int(quote_age)}s old' if quote_is_fresh
+                         else ("stale" if live_quote else "off (enable Live mode)"))
+                st.markdown(f'<div class="stat"><span class="k">live quote sync</span>'
+                            f'<span class="v">{q_txt}</span></div>', unsafe_allow_html=True)
 
         st.write("")
         tabs = st.tabs(["Overview", "Signals", "Journal", "Mistakes", "Memory", "Packet"])
@@ -347,11 +523,11 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                             side = "green" if c["direction"] == "long" else "red"
                             st.markdown(
                                 f'<div class="stat"><span class="k">'
-                                f'<span class="chip {side}"><span class="dot"></span>{c["direction"]}</span>'
-                                f'&nbsp; {c["strategy_name"]} · grade {c["grade"]} · swept '
-                                f'{(cj.get("context") or {}).get("swept_level", "—")}</span>'
-                                f'<span class="v">entry {cj.get("entry_ref")} · stop {cj.get("stop")} '
-                                f'· tgt {cj.get("target")} · RR {cj.get("rr", 0):.2f}</span></div>',
+                                f'<span class="chip {side}"><span class="dot"></span>{h(c["direction"])}</span>'
+                                f'&nbsp; {h(c["strategy_name"])} · grade {h(c["grade"])} · swept '
+                                f'{h((cj.get("context") or {}).get("swept_level", "—"))}</span>'
+                                f'<span class="v">entry {h(cj.get("entry_ref"))} · stop {h(cj.get("stop"))} '
+                                f'· tgt {h(cj.get("target"))} · RR {cj.get("rr", 0):.2f}</span></div>',
                                 unsafe_allow_html=True)
                     else:
                         st.markdown('<div class="stat"><span class="k">no candidates in the last scans'
@@ -369,9 +545,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                                         f'▸ price</span><span class="px" style="color:#46e264">{px:,.2f}'
                                         f'</span><span class="src">now</span></div>', unsafe_allow_html=True)
                             shown_px = True
-                        st.markdown(f'<div class="lvl"><span class="name">{name}</span>'
+                        st.markdown(f'<div class="lvl"><span class="name">{h(name)}</span>'
                                     f'<span class="px">{lvl:,.2f}</span>'
-                                    f'<span class="src">{src}</span></div>', unsafe_allow_html=True)
+                                    f'<span class="src">{h(src)}</span></div>', unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown('<div class="microlabel">Context</div>', unsafe_allow_html=True)
                     vpos = state.get("vwap_position")
@@ -387,12 +563,12 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     ]
                     for k, v, tone in rows:
                         st.markdown(f'<div class="stat"><span class="k">{k}</span>'
-                                    f'<span class="v {tone}">{v}</span></div>', unsafe_allow_html=True)
+                                    f'<span class="v {tone}">{h(v)}</span></div>', unsafe_allow_html=True)
                 with st.container(border=True):
                     st.markdown('<div class="microlabel">Bar coverage</div>', unsafe_allow_html=True)
                     for c in ov["coverage"]:
-                        st.markdown(f'<div class="stat"><span class="k">{c["timeframe"]}</span>'
-                                    f'<span class="v">{c["bars"]} bars · to {c["last"]}</span></div>',
+                        st.markdown(f'<div class="stat"><span class="k">{h(c["timeframe"])}</span>'
+                                    f'<span class="v">{h(c["bars"])} bars · to {h(c["last"])}</span></div>',
                                     unsafe_allow_html=True)
 
         # ── signals ──────────────────────────────────────────────────────────
@@ -408,10 +584,10 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         ids.append(srow["id"])
                         tone = {"LONG": "green", "SHORT": "red", "REJECT": "gray"}.get(srow["decision"], "amber")
                         st.markdown(
-                            f'<div class="stat"><span class="k">#{srow["id"]} · {srow["trading_day"]} '
-                            f'{srow["session"]} · {srow["setup"]}</span>'
+                            f'<div class="stat"><span class="k">#{h(srow["id"])} · {h(srow["trading_day"])} '
+                            f'{h(srow["session"])} · {h(srow["setup"])}</span>'
                             f'<span class="v"><span class="chip {tone}"><span class="dot"></span>'
-                            f'{srow["decision"]}</span></span></div>', unsafe_allow_html=True)
+                            f'{h(srow["decision"])}</span></span></div>', unsafe_allow_html=True)
             with colB:
                 with st.container(border=True):
                     st.markdown('<div class="microlabel">Inspect signal</div>', unsafe_allow_html=True)
@@ -424,25 +600,25 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         if cand:
                             st.markdown(
                                 f'<div class="stat"><span class="k">geometry</span><span class="v">'
-                                f'entry {cand.get("entry_lo")}–{cand.get("entry_hi")} · stop {cand.get("stop")} '
-                                f'· target {cand.get("target")} ({cand.get("target_name")}) · '
-                                f'RR {cand.get("rr", 0):.2f} · grade {cand.get("grade")}</span></div>',
+                                f'entry {h(cand.get("entry_lo"))}–{h(cand.get("entry_hi"))} · stop {h(cand.get("stop"))} '
+                                f'· target {h(cand.get("target"))} ({h(cand.get("target_name"))}) · '
+                                f'RR {cand.get("rr", 0):.2f} · grade {h(cand.get("grade"))}</span></div>',
                                 unsafe_allow_html=True)
                             st.markdown(f'<div class="stat"><span class="k">confluences</span>'
-                                        f'<span class="v">{", ".join(cand.get("confluences", []) or ["—"])}'
+                                        f'<span class="v">{h(", ".join(cand.get("confluences", []) or ["—"]))}'
                                         f'</span></div>', unsafe_allow_html=True)
                         for chk in g["checklist"]:
                             cls = "pass" if chk.get("passed") else "fail"
                             st.markdown(f'<div class="chk {cls}"><span class="mark">'
                                         f'{"PASS" if chk.get("passed") else "FAIL"}</span>'
-                                        f'<span>{chk.get("check")}</span>'
-                                        f'<span class="why">{chk.get("detail")}</span></div>',
+                                        f'<span>{h(chk.get("check"))}</span>'
+                                        f'<span class="why">{h(chk.get("detail"))}</span></div>',
                                         unsafe_allow_html=True)
                         if g["invalidation"]:
                             st.markdown('<div class="microlabel" style="margin-top:.6rem">Invalidation</div>',
                                         unsafe_allow_html=True)
                             for inv in g["invalidation"]:
-                                st.markdown(f'<div class="stat"><span class="k">✕ {inv}</span></div>',
+                                st.markdown(f'<div class="stat"><span class="k">✕ {h(inv)}</span></div>',
                                             unsafe_allow_html=True)
                     else:
                         st.caption("nothing to inspect yet")
@@ -498,9 +674,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         for r in ov["reviews"][:8]:
                             res = f'{r["result_r"]:+.2f}R' if r["result_r"] is not None else ("taken" if r["taken"] else "skipped")
                             tone = "green" if (r["result_r"] or 0) > 0 else ("red" if (r["result_r"] or 0) < 0 else "muted")
-                            st.markdown(f'<div class="stat"><span class="k">#{r["signal_id"]} · '
-                                        f'{(r["notes"] or "")[:60]}</span>'
-                                        f'<span class="v {tone}">{res}</span></div>', unsafe_allow_html=True)
+                            st.markdown(f'<div class="stat"><span class="k">#{h(r["signal_id"])} · '
+                                        f'{h((r["notes"] or "")[:60])}</span>'
+                                        f'<span class="v {tone}">{h(res)}</span></div>', unsafe_allow_html=True)
                     else:
                         st.caption("no reviews yet")
 
@@ -511,9 +687,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                             unsafe_allow_html=True)
                 if ov["mistakes"]:
                     for m in ov["mistakes"]:
-                        st.markdown(f'<div class="stat"><span class="k"><b>{m["tag"]}</b> — '
-                                    f'{m["description"] or ""}</span>'
-                                    f'<span class="v muted">{m["rule_update"] or ""}</span></div>',
+                        st.markdown(f'<div class="stat"><span class="k"><b>{h(m["tag"])}</b> — '
+                                    f'{h(m["description"] or "")}</span>'
+                                    f'<span class="v muted">{h(m["rule_update"] or "")}</span></div>',
                                     unsafe_allow_html=True)
                 else:
                     st.caption("clean slate — log mistakes from the Journal tab")
@@ -535,10 +711,10 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                             oc_txt = (f'{oc.get("result_r"):+.2f}R' if oc.get("result_r") is not None
                                       else ("taken" if oc.get("taken") else "no review"))
                             tone = "green" if (oc.get("result_r") or 0) > 0 else ("red" if (oc.get("result_r") or 0) < 0 else "muted")
-                            st.markdown(f'<div class="stat"><span class="k">#{s_["signal_id"]} · '
-                                        f'{s_["trading_day"]} {s_["session"]} · {s_["decision"]} · '
-                                        f'grade {s_["grade"]} · RR {s_["rr"]} · swept {s_["swept_level"]}</span>'
-                                        f'<span class="v {tone}">{oc_txt}</span></div>',
+                            st.markdown(f'<div class="stat"><span class="k">#{h(s_["signal_id"])} · '
+                                        f'{h(s_["trading_day"])} {h(s_["session"])} · {h(s_["decision"])} · '
+                                        f'grade {h(s_["grade"])} · RR {h(s_["rr"])} · swept {h(s_["swept_level"])}</span>'
+                                        f'<span class="v {tone}">{h(oc_txt)}</span></div>',
                                         unsafe_allow_html=True)
                     else:
                         st.caption("no similar setups on record yet — memory grows as you journal")
@@ -547,31 +723,55 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
 
         # ── packet ───────────────────────────────────────────────────────────
         with tabs[5]:
-            with st.container(border=True):
-                st.markdown('<div class="microlabel">Claude prompt packet</div>', unsafe_allow_html=True)
-                st.caption("Claude explains, grades, warns, journals. The decision field does not "
-                           "exist in its output schema — the gate already decided.")
+            # Build (or reuse) the packet OUTSIDE the render fragment. The DB
+            # and prep/preflight filesystem reads run at most once per new
+            # signal/state/journal edit, and the heavy text blocks render
+            # inside an isolated fragment — live-mode refresh ticks and the
+            # rest of the dashboard never wait on them.
+            sig_row = ov["latest_signal"]
+            pkt_key = (f'{symbol}:{sig_row["id"] if sig_row else "none"}:{state.get("ts")}:'
+                       f'{len(ov["mistakes"])}:{len(ov["reviews"])}:'
+                       f'{(ov["bias"] or {}).get("bias")}:{pf["status"]}')
+            pc = st.session_state.get("_packet_cache") or {}
+            if pc.get("key") != pkt_key:
                 try:
                     packet = packet_from_latest(store, config, symbol)
+                    pc = {"key": pkt_key, "packet": packet,
+                          "md": render_markdown(packet),
+                          "json": export_packet_json(packet), "error": None}
+                except ValueError as e:
+                    pc = {"key": pkt_key, "packet": None, "md": "", "json": "",
+                          "error": str(e)}
+                st.session_state["_packet_cache"] = pc
+
+            @st.fragment
+            def packet_tab() -> None:
+                with st.container(border=True):
+                    st.markdown('<div class="microlabel">Claude prompt packet</div>',
+                                unsafe_allow_html=True)
+                    st.caption("Claude explains, grades, warns, journals. The decision field does "
+                               "not exist in its output schema — the gate already decided.")
+                    if pc["error"]:
+                        st.info(pc["error"])
+                        return
                     pcol1, pcol2 = st.columns([1, 1])
                     with pcol1:
                         if st.button("Write packet files (JSON + MD)"):
-                            jp, mp = write_packet(packet, config)
+                            jp, mp = write_packet(pc["packet"], config)
                             st.success(f"written: {jp.name}, {mp.name} → {jp.parent}")
-                        st.download_button("Download JSON",
-                                           json.dumps(packet, indent=2, default=str),
+                        st.download_button("Download JSON", pc["json"],
                                            file_name="copilot_packet.json", mime="application/json")
                     with pcol2:
-                        st.download_button("Download Markdown", render_markdown(packet),
+                        st.download_button("Download Markdown", pc["md"],
                                            file_name="copilot_packet.md", mime="text/markdown")
                     view = st.radio("view", ["markdown", "json"], horizontal=True,
                                     label_visibility="collapsed", key="packet_view")
                     if view == "markdown":
-                        st.markdown(render_markdown(packet))
+                        st.markdown(pc["md"])
                     else:
-                        st.json(packet, expanded=False)
-                except ValueError as e:
-                    st.info(str(e))
+                        st.json(pc["packet"], expanded=False)
+
+            packet_tab()
     finally:
         store.close()
 

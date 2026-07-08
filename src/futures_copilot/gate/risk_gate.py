@@ -23,13 +23,16 @@ from zoneinfo import ZoneInfo
 
 from ..config import Config
 from ..db.store import Store
+from ..features.equal_levels import equal_level_near_stop
 from ..features.market_state import MarketState
 from ..strategies.base import SignalCandidate
 from ..strategies.liquidity_trap import TF_SECONDS
+from ..utils.roll_dates import is_in_roll_window
 
 ET = ZoneInfo("America/New_York")
 
 DECISIONS = ("LONG", "SHORT", "WAIT", "REJECT")
+ROLL_WINDOW_REJECT_REASON = "Roll window active - contract rollover in progress"
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,45 @@ class GateOutput:
         return " ".join(parts)
 
 
+def _hm_minutes(s: str) -> int:
+    h, _, m = s.partition(":")
+    return int(h) * 60 + int(m)
+
+
+def golden_hour_status(config: Config, horizon_ts: int) -> tuple[bool, str]:
+    """(within_window, detail) for the DECISION time (market-state horizon).
+    Start inclusive, end exclusive: 09:30 passes, 11:00 rejects. ET wall clock."""
+    r = config.risk
+    start_s, end_s = r.golden_hour[0], r.golden_hour[1]
+    dt = datetime.fromtimestamp(horizon_ts, tz=ET)
+    now_min = dt.hour * 60 + dt.minute
+    within = _hm_minutes(start_s) <= now_min < _hm_minutes(end_s)
+    return within, (f"decision time {dt:%H:%M} ET vs golden hour "
+                    f"[{start_s}, {end_s}) — {'inside' if within else 'outside'}")
+
+
+def trade_governor_status(store: Store, config: Config, symbol: str,
+                          trading_day: str) -> tuple[bool, str, dict]:
+    """(clear, detail, counts) from JOURNALED trade_reviews of this trading day.
+    Wins: taken with result_r > 0. Losses: taken with result_r < 0.
+    Skipped reviews and scratch/zero results count as neither."""
+    r = config.risk
+    results = store.day_trade_results(symbol, trading_day)
+    wins = sum(1 for x in results if x["taken"] and (x["result_r"] or 0) > 0)
+    losses = sum(1 for x in results if x["taken"] and (x["result_r"] or 0) < 0)
+    blocked_win = r.stop_on_first_win and wins >= 1
+    blocked_loss = losses >= r.stop_after_losses
+    clear = not (blocked_win or blocked_loss)
+    if blocked_win:
+        detail = f"{wins} journaled win(s) today — stop_on_first_win is on; done for the day"
+    elif blocked_loss:
+        detail = f"{losses} journaled loss(es) today (max {r.stop_after_losses}) — done for the day"
+    else:
+        detail = (f"{wins} win(s), {losses} loss(es) journaled today "
+                  f"(stop on first win: {r.stop_on_first_win}, stop after {r.stop_after_losses} losses)")
+    return clear, detail, {"wins": wins, "losses": losses, "reviews": len(results)}
+
+
 def _news_blackout(config: Config, horizon_ts: int) -> str | None:
     for nb in config.risk.news_blackouts:
         try:
@@ -83,10 +125,31 @@ def _news_blackout(config: Config, horizon_ts: int) -> str | None:
     return None
 
 
+def _roll_window_reject(cand: SignalCandidate) -> GateDecision:
+    return GateDecision(
+        decision="REJECT",
+        candidate=cand,
+        checklist=[
+            CheckResult(
+                "roll_window_clear",
+                False,
+                ROLL_WINDOW_REJECT_REASON,
+            )
+        ],
+        reasons=[ROLL_WINDOW_REJECT_REASON],
+        warnings=list(cand.warnings),
+        invalidation=[],
+    )
+
+
 def _evaluate_candidate(
     cand: SignalCandidate, state: MarketState, store: Store, config: Config,
     passed_this_run: dict[str, int], counting_from_table: bool,
 ) -> GateDecision:
+    signal_date = datetime.fromtimestamp(cand.ts, tz=ET).date()
+    if is_in_roll_window(signal_date):
+        return _roll_window_reject(cand)
+
     r = config.risk
     horizon = state.as_of_close_ts
     tf_s = TF_SECONDS.get(cand.detection_timeframe, 300)
@@ -139,6 +202,43 @@ def _evaluate_candidate(
     # session filter
     check("session_allowed", cand.session in r.allowed_sessions,
           f"session={cand.session} allowed={r.allowed_sessions}")
+
+    # golden hour (Desk Mode): actionable only inside the ET window, judged at
+    # the market-state horizon (as_of_close_ts) — same no-lookahead clock as
+    # every other check. 09:30 inclusive, 11:00 exclusive.
+    if r.enforce_golden_hour:
+        within, gh_detail = golden_hour_status(config, horizon)
+        check("golden_hour_allowed", within, gh_detail)
+    else:
+        check("golden_hour_allowed", True, "golden hour not enforced")
+
+    # trade governor (Desk Mode): journaled outcomes end the day early.
+    gov_clear, gov_detail, _gov = trade_governor_status(
+        store, config, cand.symbol, state.trading_day)
+    check("trade_governor_clear", gov_clear, gov_detail)
+
+    # equal high/low stop magnet (Desk Mode): stop must not sit inside an
+    # obvious equal-lows/equal-highs cluster on the detection timeframe.
+    if r.reject_equal_level_stop_magnets:
+        spec = config.symbols.get(cand.symbol)
+        if spec is None:
+            check("stop_not_at_equal_liquidity", True,
+                  f"no symbol spec for {cand.symbol} — cannot judge")
+        else:
+            tol = r.equal_level_tolerance_ticks * spec.tick_size
+            df_det = store.get_candles_df(cand.symbol, cand.detection_timeframe)
+            hit = equal_level_near_stop(
+                df_det, direction=cand.direction, stop=cand.stop, tolerance=tol,
+                lookback_bars=r.equal_level_lookback_bars,
+                horizon_ts=horizon, tf_seconds=tf_s,
+            )
+            check("stop_not_at_equal_liquidity", hit is None,
+                  hit.describe() if hit else
+                  f"no equal-{'lows' if cand.direction == 'long' else 'highs'} cluster "
+                  f"within {tol:.2f} of stop {cand.stop} "
+                  f"(last {r.equal_level_lookback_bars} closed {cand.detection_timeframe} bars)")
+    else:
+        check("stop_not_at_equal_liquidity", True, "equal-level filter not enforced")
 
     # chop filter: developing day range must be worth trading
     day_span = None

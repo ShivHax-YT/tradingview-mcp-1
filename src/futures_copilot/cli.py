@@ -8,6 +8,8 @@
     copilot state --symbol MNQ          structured market-state JSON from stored bars
     copilot scan  --symbol MNQ          strategies + risk gate on stored bars
     copilot packet [--latest]           write Claude prompt packet (JSON + Markdown)
+    copilot prep --symbol MNQ --day YYYY-MM-DD   cache allowlisted vault notes for the day
+    copilot preflight --symbol MNQ --day YYYY-MM-DD   build the desk-memory cache from the journal
     copilot journal <bias|review|result|mistake|show>   trading journal
     copilot dashboard                   launch the local Streamlit dashboard
     copilot load-fixtures <csv>         load fixture bars (tests/offline dev ONLY)
@@ -26,6 +28,19 @@ from pathlib import Path
 from .config import Config, load_config
 from .db.store import Store
 from .errors import CopilotError
+from .utils.symbols import normalize_symbol, resolve_symbol
+
+
+def _canonical_cli_symbol(symbol: str) -> str:
+    resolve_symbol(symbol)
+    return normalize_symbol(symbol)
+
+
+def _resolve_cli_symbols(args) -> None:
+    if hasattr(args, "symbol"):
+        args.symbol = _canonical_cli_symbol(args.symbol)
+    if hasattr(args, "symbols") and args.symbols is not None:
+        args.symbols = [_canonical_cli_symbol(s) for s in args.symbols]
 
 
 def _make_source(config: Config):
@@ -170,6 +185,57 @@ def cmd_packet(config: Config, args) -> int:
     return 0
 
 
+def cmd_prep(config: Config, args) -> int:
+    """Session prep: read the FIXED vault allowlist once, write the JSON cache.
+    Never runs in the live loop — scan/gate/dashboard work without it."""
+    import time as _time
+
+    from .features.sessions import trading_day
+    from .prep import VAULT_ALLOWLIST, build_session_prep, write_session_prep
+
+    day = args.day or trading_day(int(_time.time()), config.sessions).isoformat()
+    prep = build_session_prep(config, args.symbol, day, vault_dir=args.vault)
+    path = write_session_prep(prep, config)
+    print(f"session prep cached: {path}")
+    print(f"  notes: {len(prep['notes'])}/{len(VAULT_ALLOWLIST)} allowlisted files")
+    for n in prep["notes"]:
+        trunc = " (truncated)" if n["truncated"] else ""
+        print(f"    - {n['path']} [{n['chars']} chars{trunc}]")
+    for m in prep["missing"]:
+        print(f"    ! missing: {m}")
+    print("vault context is explanation-only; the risk gate and you still decide")
+    return 0
+
+
+def cmd_preflight(config: Config, args) -> int:
+    """Desk Memory / Preflight: deterministic journal statistics -> local JSON
+    cache. SQLite only — no TradingView, no Obsidian, no Claude, no network."""
+    import time as _time
+
+    from .features.sessions import trading_day
+    from .preflight import build_preflight, write_preflight
+
+    day = args.day or trading_day(int(_time.time()), config.sessions).isoformat()
+    with Store(config.db_file) as store:
+        store.init_schema()
+        memory = build_preflight(store, config, args.symbol, day)
+        path = write_preflight(memory, config)
+    perf = memory["performance"]
+    print(f"desk memory cached: {path}")
+    print(f"  reviews counted: {perf['total_reviewed']} "
+          f"({perf['taken']} taken / {perf['skipped']} skipped · "
+          f"{perf['wins']}W {perf['losses']}L {perf['scratches']} scratch"
+          + (f" · avg {perf['avg_result_r']:+.2f}R" if perf["avg_result_r"] is not None else "")
+          + ")")
+    if memory["top_mistake_tags"]:
+        tags = ", ".join(f"{t['tag']} x{t['count']}" for t in memory["top_mistake_tags"])
+        print(f"  top mistakes: {tags}")
+    for w in memory["warnings"][:6]:
+        print(f"  ! {w}")
+    print("deterministic journal memory — reminders only; the gate and you decide")
+    return 0
+
+
 def cmd_journal(config: Config, args) -> int:
     import json as _json
 
@@ -279,6 +345,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--symbol", default="MNQ")
     p.add_argument("--stdout", action="store_true", help="also print the JSON packet")
 
+    p = sub.add_parser("prep", help="cache allowlisted Obsidian notes for a trading day "
+                                    "(read once, never in the live loop)")
+    p.add_argument("--symbol", default="MNQ")
+    p.add_argument("--day", default=None, help="trading day YYYY-MM-DD (default: today's)")
+    p.add_argument("--vault", default=None, help="vault root override (default: vault.path)")
+
+    p = sub.add_parser("preflight", help="build the desk-memory cache from journaled trades "
+                                         "(SQLite only; works without TradingView)")
+    p.add_argument("--symbol", default="MNQ")
+    p.add_argument("--day", default=None, help="trading day YYYY-MM-DD (default: today's)")
+
     pj = sub.add_parser("journal", help="trading journal: bias / review / result / mistake / show")
     jsub = pj.add_subparsers(dest="journal_command", required=True)
 
@@ -329,14 +406,20 @@ def main(argv: list[str] | None = None) -> int:
         "state": cmd_state,
         "scan": cmd_scan,
         "packet": cmd_packet,
+        "prep": cmd_prep,
+        "preflight": cmd_preflight,
         "journal": cmd_journal,
         "dashboard": cmd_dashboard,
         "load-fixtures": cmd_load_fixtures,
     }
     try:
         config = load_config(args.config)
+        _resolve_cli_symbols(args)
         return handlers[args.command](config, args)
     except CopilotError as e:
+        print(f"ERROR {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
         print(f"ERROR {e}", file=sys.stderr)
         return 2
 

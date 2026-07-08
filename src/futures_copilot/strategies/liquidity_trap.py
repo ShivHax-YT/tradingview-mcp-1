@@ -191,6 +191,24 @@ class SessionLiquidityTrap(Strategy):
         if entry_kind == "fvg_retest":
             confluences.append("fvg_entry")
 
+        # IFVG inversion evidence (Desk Mode v0.2): an opposite-kind FVG that a
+        # candle body CLOSED through AFTER the sweep means the prior delivery
+        # flipped in the trade's favor. This is confluence/evidence ONLY — it
+        # never gates, never creates candidates, and cannot override risk.
+        ifvg = None
+        opp_kind = "bearish" if direction == "long" else "bullish"
+        for g in detect_fvgs(df, tf_s):
+            if g.kind != opp_kind or g.inverted_ts is None:
+                continue
+            if g.created_close_ts > ctx.horizon_ts or g.inverted_ts > ctx.horizon_ts:
+                continue                     # not knowable at the horizon
+            if g.inverted_ts <= sweep.ts:
+                continue                     # inversion must belong to the reversal leg
+            ifvg = g
+            break
+        if ifvg is not None:
+            confluences.append("ifvg_inversion")
+
         pd_ctx = st.premium_discount_day
         if pd_ctx is not None:
             favorable = (direction == "long" and pd_ctx == "discount") or (
@@ -239,6 +257,10 @@ class SessionLiquidityTrap(Strategy):
                 "cisd_ts": cisd.ts if cisd else None, "cisd_level": cisd.level if cisd else None,
                 "confirmation_kind": conf.kind,
                 "entry_kind": entry_kind,
+                "ifvg_inversion": (
+                    {"top": ifvg.top, "bottom": ifvg.bottom,
+                     "inverted_ts": ifvg.inverted_ts} if ifvg is not None else None
+                ),
                 "atr": cur_atr,
                 "premium_discount_day": st.premium_discount_day,
                 "vwap": st.vwap, "vwap_position": st.vwap_position,

@@ -109,8 +109,35 @@ class RiskConfig(BaseModel):
     max_entry_distance_atr_mult: float = 0.5
     min_target_atr_mult: float = 0.5          # target closer than this*ATR rejects
     chop_min_day_range_atr_mult: float = 2.0  # day span below this*ATR15 = chop
-    allowed_sessions: list[str] = Field(default_factory=lambda: ["london", "ny"])
+    allowed_sessions: list[str] = Field(default_factory=lambda: ["ny"])  # Desk Mode: NY only
     news_blackouts: list[NewsBlackout] = Field(default_factory=list)
+
+    # ── Desk Mode v0.2 ───────────────────────────────────────────────────────
+    # Golden hour: actionable candidates only inside this ET window.
+    # Start is inclusive, end is exclusive (09:30 passes, 11:00 rejects).
+    enforce_golden_hour: bool = True
+    golden_hour: list[str] = Field(default_factory=lambda: ["09:30", "11:00"])
+    # Trade governor over JOURNALED results (trade_reviews joined to signals of
+    # the same trading day). Skipped trades and scratch/zero results count as
+    # neither win nor loss.
+    stop_on_first_win: bool = True
+    stop_after_losses: int = 2
+    # Equal high/low stop-magnet filter: reject when >=2 recent detection-TF
+    # bars have lows (long) / highs (short) within tolerance of the stop.
+    reject_equal_level_stop_magnets: bool = True
+    equal_level_tolerance_ticks: int = 3
+    equal_level_lookback_bars: int = 50
+
+    @field_validator("golden_hour")
+    @classmethod
+    def _golden_hour_shape(cls, v: list[str]) -> list[str]:
+        if len(v) != 2:
+            raise ValueError('golden_hour must be ["HH:MM", "HH:MM"]')
+        for s in v:
+            h, _, m = s.partition(":")
+            if not (h.isdigit() and m.isdigit() and 0 <= int(h) < 24 and 0 <= int(m) < 60):
+                raise ValueError(f"golden_hour entry {s!r} is not HH:MM")
+        return v
 
     @field_validator("auto_execution_enabled")
     @classmethod
@@ -128,6 +155,26 @@ class RiskConfig(BaseModel):
         if not v:
             raise ValueError("manual_approval_required=false is not permitted in this project.")
         return v
+
+
+class PreflightConfig(BaseModel):
+    """Desk Memory / Preflight (v0.3): deterministic journal memory built from
+    SQLite BEFORE a session. Not model training — statistics and reminders.
+    Never runs in the live scan loop; never reads Obsidian (that is `prep`)."""
+    enabled: bool = True
+    memory_dir: str = "data/session_memory"
+    lookback_reviews: int = 50       # newest journaled reviews considered
+    lookback_days: int = 20          # ... within this many trading days
+    top_mistakes: int = 5            # mistake tags surfaced
+    min_samples_for_pattern: int = 3 # smaller groups are noise, not patterns
+
+
+class VaultConfig(BaseModel):
+    """Obsidian vault used ONLY by `copilot prep` (session-prep cache).
+    The live scan/risk gate NEVER reads the vault — Desk Mode latency rule."""
+    path: str | None = None              # vault root; None disables `copilot prep`
+    session_prep_dir: str = "data/session_prep"
+    max_chars_per_note: int = 4000       # keep the cache compact
 
 
 class VectorMemoryConfig(BaseModel):
@@ -157,6 +204,8 @@ class Config(BaseModel):
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    vault: VaultConfig = Field(default_factory=VaultConfig)
+    preflight: PreflightConfig = Field(default_factory=PreflightConfig)
 
     # Directory containing config.yaml; relative paths resolve against it.
     root: Path = Field(default=Path("."))

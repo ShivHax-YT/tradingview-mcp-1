@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from ..config import Config
 from ..db.store import Store
 from ..errors import DataSourceError
+from ..utils.roll_dates import is_in_roll_window
 from .fvg import detect_fvgs
 from .levels import LEVEL_TF_PREFERENCE, multi_tf_day_high_low, multi_tf_prior_day_high_low, multi_tf_session_high_low, opening_range
 from .pricing import position_in_range, premium_discount
@@ -59,6 +60,8 @@ class MarketState(BaseModel):
     last_swing_low_5m: dict[str, Any] | None
     open_fvgs_5m: list[dict[str, Any]] = Field(default_factory=list)
     bar_counts: dict[str, int] = Field(default_factory=dict)
+    reliable: bool = True
+    reason: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(self.model_dump(), indent=2, default=str)
@@ -86,6 +89,7 @@ def build_market_state(store: Store, config: Config, symbol: str, as_of_ts: int 
     horizon = last_ts + 60
     price = float(last["close"])
     day = trading_day(last_ts, scfg)
+    roll_window = is_in_roll_window(day)
 
     # Multi-timeframe frames, all as-of filtered — the fallback can never see future bars.
     dfs = {tf: _df_as_of(store, symbol, tf, as_of_ts) for tf in LEVEL_TF_PREFERENCE}
@@ -188,4 +192,6 @@ def build_market_state(store: Store, config: Config, symbol: str, as_of_ts: int 
             tf: int(len(_df_as_of(store, symbol, tf, as_of_ts)))
             for tf in config.timeframes.canonical
         },
+        reliable=not roll_window,
+        reason="roll_window" if roll_window else None,
     )

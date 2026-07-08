@@ -104,9 +104,42 @@ risk:
   max_entry_distance_atr_mult: 0.5  # price farther than N*ATR from entry zone = chased
   min_target_atr_mult: 0.5          # target closer than this*ATR = not worth it
   chop_min_day_range_atr_mult: 2.0  # day span < this*ATR15 = chop, stand down
-  allowed_sessions: ["london", "ny"]
+  allowed_sessions: ["ny"]          # Desk Mode v0.2: NY session only
+  # ── Desk Mode v0.2 ──
+  # Golden hour (America/New_York): start inclusive, end exclusive.
+  enforce_golden_hour: true
+  golden_hour: ["09:30", "11:00"]
+  # Trade governor over JOURNALED trade_reviews of the same trading day:
+  # one journaled win = done for the day; N journaled losses = done.
+  # Skipped trades and scratch (0R) results count as neither.
+  stop_on_first_win: true
+  stop_after_losses: 2
+  # Equal high/low stop-magnet filter: reject when >=2 recent detection-TF bars
+  # have lows (long) / highs (short) within tolerance ticks of the stop.
+  reject_equal_level_stop_magnets: true
+  equal_level_tolerance_ticks: 3
+  equal_level_lookback_bars: 50
   # MANUAL news windows (America/New_York wall clock). No scraping, no feeds —
   # if it matters, you type it in. Example:
   #   news_blackouts:
   #     - {start: "2026-07-02 08:30", minutes: 30, label: "NFP"}
   news_blackouts: []
+
+preflight:
+  # Desk Memory / Preflight (v0.3): deterministic journal memory built from
+  # SQLite BEFORE a session (`copilot preflight`). Statistics and reminders,
+  # not model training. Never runs in the live scan loop; never reads Obsidian.
+  enabled: true
+  memory_dir: data/session_memory
+  lookback_reviews: 50
+  lookback_days: 20
+  top_mistakes: 5
+  min_samples_for_pattern: 3
+
+vault:
+  # Obsidian vault used ONLY by `copilot prep` (session-prep cache written to
+  # data/session_prep/). The live scan/risk gate/dashboard refresh NEVER read
+  # the vault — Python/risk gate first, Claude/Obsidian later.
+  path: "C:/Users/ShivHax/Documents/Trading Brain/Trading Brain"
+  session_prep_dir: data/session_prep
+  max_chars_per_note: 4000

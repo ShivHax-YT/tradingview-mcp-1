@@ -11,6 +11,11 @@ say "this A-grade long looks weak because X" — it cannot turn a WAIT into a
 LONG, move a stop, or approve anything. That authority belongs to the risk
 gate (code) and to the human (you).
 
+The Claude-facing prompt lives in an external template
+(`templates/fable_review.md`) — writer.py holds no prompt text. The template
+receives a MINIFIED context block (`sym`/`px`/`act`/`rr`/`v_rules`) so the
+token cost of a review stays flat regardless of how much the full packet grows.
+
 No Anthropic API is called in v0.1: packets are written to disk and pasted
 into Claude manually.
 """
@@ -26,18 +31,21 @@ from ..config import Config
 from ..db.store import Store
 from ..features.sessions import to_et
 from ..memory import similar_setups
+from ..prep import load_session_prep
+from ..preflight import load_preflight
 from ..strategies.liquidity_trap import TF_SECONDS
 
 PACKET_SCHEMA_VERSION = "copilot.packet.v1"
 
-CLAUDE_ROLE = (
-    "You are the explanation layer of a MANUAL paper-trading copilot. "
-    "Python computed everything below; the risk-gate decision is FINAL and is not yours "
-    "to change, upgrade, or soften. Explain the setup in plain language, grade its quality, "
-    "point out risks the checklist may understate, connect it to the trader's past mistakes "
-    "and similar setups, and draft a journal note. The human approves or skips the trade — "
-    "never you. If the decision is WAIT or REJECT, help the trader stay patient."
-)
+# Claude prompt template (external file — single source of truth for the role).
+PACKET_TEMPLATE_FILE = Path("src/futures_copilot/packet/templates/fable_review.md")
+MINIFIED_PACKET_PLACEHOLDER = "{{MINIFIED_PACKET}}"
+_TEMPLATE_CACHE: dict[str, str | None] = {"text": None}
+
+# Maximum decimal places for floats in every exported payload.
+_EXPORT_FLOAT_DECIMALS = 2
+# Failed-rule lists are sliced to this many items in the minified context.
+_MAX_VIOLATED_RULES = 2
 
 CLAUDE_OUTPUT_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -55,6 +63,84 @@ CLAUDE_OUTPUT_SCHEMA: dict[str, Any] = {
     },
     "note": "There is intentionally no decision/action/entry/size field. The risk gate already decided.",
 }
+
+
+def load_template() -> str:
+    """Read the Fable review prompt template (cached after first read).
+
+    Reads the spec'd repo-relative path when running from the project root;
+    falls back to a module-relative path so installed/`streamlit run`/other-cwd
+    invocations resolve the same file.
+    """
+    if _TEMPLATE_CACHE["text"] is None:
+        if PACKET_TEMPLATE_FILE.exists():
+            template_text = Path("src/futures_copilot/packet/templates/fable_review.md").read_text(encoding="utf-8")
+        else:
+            template_text = (Path(__file__).resolve().parent / "templates" / "fable_review.md").read_text(encoding="utf-8")
+        _TEMPLATE_CACHE["text"] = template_text
+    return _TEMPLATE_CACHE["text"]
+
+
+def _round2(value: Any) -> float:
+    """Best-effort 2-decimal float; 0.0 for missing/non-numeric values."""
+    try:
+        return round(float(value), _EXPORT_FLOAT_DECIMALS)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _round_floats(obj: Any) -> Any:
+    """Recursively round every float in a payload to 2 decimal places."""
+    if isinstance(obj, bool):               # bool is an int subclass — leave it
+        return obj
+    if isinstance(obj, float):
+        return round(obj, _EXPORT_FLOAT_DECIMALS)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_round_floats(v) for v in obj]
+    return obj
+
+
+def minify_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """Compress a full packet into the tight Claude-facing context block.
+
+    Exact schema: {"sym": str, "px": float, "act": str, "rr": float,
+    "v_rules": list}. Floats are rounded to 2 decimals and the violated-rule
+    list is sliced to the top 2 entries to minimize context-window bloat.
+    """
+    state = packet.get("market_state") or {}
+    gate = packet.get("risk_gate") or {}
+    cand = packet.get("candidate") or {}
+
+    violated: list[str] = [str(r) for r in (gate.get("reasons") or [])]
+    violated += [str(c.get("check")) for c in (gate.get("checklist") or [])
+                 if not c.get("passed") and c.get("check")]
+    seen: set[str] = set()
+    v_rules = [r for r in violated if not (r in seen or seen.add(r))]
+
+    return {
+        "sym": str(state.get("symbol", "")),
+        "px": _round2(state.get("current_price")),
+        "act": str(gate.get("decision", "WAIT")),
+        "rr": _round2(cand.get("rr")),
+        "v_rules": v_rules[:_MAX_VIOLATED_RULES],
+    }
+
+
+def render_claude_prompt(packet: dict[str, Any]) -> str:
+    """Template + minified context = the exact text Claude reviews."""
+    mini = packet.get("claude_packet_min") or minify_packet(packet)
+    blob = json.dumps(mini, separators=(",", ":"), default=str)
+    template_text = load_template()
+    if MINIFIED_PACKET_PLACEHOLDER in template_text:
+        return template_text.replace(MINIFIED_PACKET_PLACEHOLDER, blob)
+    return f"{template_text.rstrip()}\n\n{blob}\n"
+
+
+def export_packet_json(packet: dict[str, Any]) -> str:
+    """Whitespace-stripped, float-rounded JSON for disk/download export."""
+    return json.dumps(_round_floats(packet), separators=(",", ":"), default=str)
 
 
 def _now_iso() -> str:
@@ -90,7 +176,17 @@ def build_packet(
 
     bias = store.get_daily_bias(trading_day, symbol) if trading_day else None
 
-    return {
+    # Session-prep vault cache: read-if-present local JSON written by
+    # `copilot prep`. Never triggers a vault read here — packets must build
+    # (and the gate must decide) with or without Obsidian.
+    session_prep = load_session_prep(config, symbol, trading_day)
+
+    # Desk Memory / Preflight cache: deterministic journal statistics written
+    # by `copilot preflight`. Read-if-present, like session_prep — reminders
+    # for Claude to echo, never authority.
+    preflight_memory = load_preflight(config, symbol, trading_day)
+
+    packet = {
         "packet_schema": PACKET_SCHEMA_VERSION,
         "generated_at": _now_iso(),
         "safety": {
@@ -99,15 +195,21 @@ def build_packet(
             "claude_may": ["explain", "grade_quality", "warn", "journal"],
             "claude_may_not": ["decide", "change_levels", "approve", "execute", "alert"],
         },
-        "claude_role": CLAUDE_ROLE,
+        "claude_role": load_template(),
         "market_state": state,
         "candidate": candidate,
         "risk_gate": gate,
         "daily_bias": bias,
         "recent_mistakes": store.list_mistakes(limit=10),
         "similar_setups": similar,
+        "session_prep": session_prep,          # vault context cache, or None
+        "preflight_memory": preflight_memory,  # journal memory cache, or None
         "claude_output_schema": CLAUDE_OUTPUT_SCHEMA,
     }
+    # The tight Claude-facing block travels WITH the archival packet so every
+    # consumer (dashboard, files, future API calls) minifies identically.
+    packet["claude_packet_min"] = minify_packet(packet)
+    return packet
 
 
 def render_markdown(packet: dict[str, Any]) -> str:
@@ -197,9 +299,39 @@ def render_markdown(packet: dict[str, Any]) -> str:
     else:
         a("- none on record yet")
     a("")
+    mem = packet.get("preflight_memory")
+    a("## Desk Memory / Preflight")
+    a("")
+    if mem:
+        perf = mem.get("performance") or {}
+        a(f"- last {perf.get('total_reviewed', 0)} reviews: {perf.get('wins', 0)}W / "
+          f"{perf.get('losses', 0)}L / {perf.get('scratches', 0)} scratch · "
+          f"{perf.get('skipped', 0)} skipped"
+          + (f" · avg {perf['avg_result_r']:+.2f}R on taken"
+             if perf.get("avg_result_r") is not None else ""))
+        for t in (mem.get("top_mistake_tags") or [])[:5]:
+            a(f"- repeated mistake: **{t.get('tag')}** x{t.get('count')}")
+        for b in (mem.get("packet_bullets") or [])[:8]:
+            a(f"- {b}")
+        a("- (deterministic journal memory — reminders only, zero decision authority)")
+    else:
+        a("- no desk-memory cache for this day — run `copilot preflight` before "
+          "the session (optional)")
+    a("")
+    prep = packet.get("session_prep")
+    a("## Session prep (vault context)")
+    a("")
+    if prep and prep.get("notes"):
+        a(f"- cached {prep.get('generated_at')} from {len(prep['notes'])} allowlisted note(s); "
+          "full text is in the JSON packet under `session_prep`")
+        for n in prep["notes"]:
+            a(f"- **{n.get('title')}** ({n.get('path')})")
+    else:
+        a("- no session prep cache for this day — run `copilot prep` before the session (optional)")
+    a("")
     a("## Your task, Claude")
     a("")
-    a(packet["claude_role"])
+    a(render_claude_prompt(packet))
     a("")
     a("Respond ONLY with JSON matching `claude_output_schema` from the JSON packet "
       "(explanation, setup_quality, warnings, mistake_echoes, journal_note, questions_for_trader). "
@@ -217,7 +349,7 @@ def write_packet(packet: dict[str, Any], config: Config) -> tuple[Path, Path]:
     base = f"packet_{stamp}_{st.get('symbol','X')}" + (f"_sig{sid}" if sid else "")
     jp = out_dir / f"{base}.json"
     mp = out_dir / f"{base}.md"
-    jp.write_text(json.dumps(packet, indent=2, default=str), encoding="utf-8")
+    jp.write_text(export_packet_json(packet), encoding="utf-8")
     mp.write_text(render_markdown(packet), encoding="utf-8")
     return jp, mp
 

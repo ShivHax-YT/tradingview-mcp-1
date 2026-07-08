@@ -20,21 +20,45 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # Collector loop + dashboard (+ live mode) share this file. Without a
+        # busy timeout a concurrent write surfaces instantly as
+        # "database is locked"; with it, SQLite retries for up to 5s.
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         try:
             # WAL = better concurrency (collector writing while dashboard reads).
             # Some filesystems (network mounts) can't do WAL; DELETE mode is fine there.
-            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA journal_mode = WAL;")
         except sqlite3.OperationalError:
-            self.conn.execute("PRAGMA journal_mode = DELETE")
+            self.conn.execute("PRAGMA journal_mode = DELETE;")
+        self.conn.execute("PRAGMA synchronous = NORMAL;")
+        self.conn.execute("PRAGMA cache_size = -50000;")
+        self.conn.commit()
 
     # -- lifecycle -------------------------------------------------------------
     def init_schema(self) -> None:
         self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._dedupe_trade_reviews_by_signal()
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_journals_signal_id "
+            "ON trade_reviews(signal_id)"
+        )
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (SCHEMA_VERSION,),
         )
         self.conn.commit()
+
+    def _dedupe_trade_reviews_by_signal(self) -> None:
+        """Keep the newest review row before enforcing one review per signal."""
+        self.conn.execute(
+            """DELETE FROM trade_reviews
+               WHERE signal_id IS NOT NULL
+                 AND id NOT IN (
+                   SELECT MAX(id) FROM trade_reviews
+                   WHERE signal_id IS NOT NULL
+                   GROUP BY signal_id
+                 )"""
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -221,8 +245,16 @@ class Store:
         return [dict(zip(cols, r)) for r in self.conn.execute(q, params).fetchall()]
 
     def get_signal(self, signal_id: int) -> dict | None:
-        rows = [r for r in self.latest_signals(limit=1_000_000) if r["id"] == signal_id]
-        return rows[0] if rows else None
+        cols = ["id", "symbol", "ts", "session", "trading_day", "decision", "setup", "grade",
+                "entry_lo", "entry_hi", "stop", "tp1", "tp2", "rr", "reasons", "warnings",
+                "invalidation", "json_signal"]
+        row = self.conn.execute(
+            "SELECT id, symbol, ts, session, trading_day, decision, setup, grade, "
+            "entry_lo, entry_hi, stop, tp1, tp2, rr, reasons, warnings, invalidation, json_signal "
+            "FROM signals WHERE id=?",
+            (signal_id,),
+        ).fetchone()
+        return dict(zip(cols, row)) if row else None
 
 
     # -- journal (Phase 5/6): bias, mistakes, reviews ---------------------------
@@ -268,13 +300,31 @@ class Store:
                          json_review: str = "{}") -> int:
         cur = self.conn.execute(
             """INSERT INTO trade_reviews (signal_id, symbol, ts_open, ts_close, taken,
-                                          result_r, max_favorable_r, max_adverse_r,
-                                          mistake_tags, notes, json_review)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                           result_r, max_favorable_r, max_adverse_r,
+                                           mistake_tags, notes, json_review)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(signal_id) DO UPDATE SET
+                   symbol=excluded.symbol,
+                   ts_open=excluded.ts_open,
+                   ts_close=excluded.ts_close,
+                   taken=excluded.taken,
+                   result_r=excluded.result_r,
+                   max_favorable_r=excluded.max_favorable_r,
+                   max_adverse_r=excluded.max_adverse_r,
+                   mistake_tags=excluded.mistake_tags,
+                   notes=excluded.notes,
+                   json_review=excluded.json_review""",
             (signal_id, symbol, ts_open, ts_close, int(taken), result_r,
              max_favorable_r, max_adverse_r, mistake_tags, notes, json_review),
         )
         self.conn.commit()
+        if signal_id is not None:
+            row = self.conn.execute(
+                "SELECT id FROM trade_reviews WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone()
+            if row is not None:
+                return int(row[0])
         return int(cur.lastrowid)
 
     def review_for_signal(self, signal_id: int) -> dict | None:
@@ -288,6 +338,49 @@ class Store:
         cols = ["id", "signal_id", "taken", "result_r", "max_favorable_r", "max_adverse_r",
                 "mistake_tags", "notes"]
         return dict(zip(cols, row))
+
+    def day_trade_results(self, symbol: str, trading_day: str) -> list[dict]:
+        """Journaled outcomes for one symbol + trading day (Desk Mode governor).
+
+        Joins trade_reviews to their signals so the trading-day attribution is
+        the SIGNAL's day, not the review's wall clock. Reviews without a
+        signal_id cannot be attributed to a day and are excluded. Returns
+        [{'taken': bool, 'result_r': float|None}] — callers decide what counts
+        as a win/loss (skipped and scratch results count as neither)."""
+        rows = self.conn.execute(
+            """SELECT tr.taken, tr.result_r FROM trade_reviews tr
+               JOIN signals s ON s.id = tr.signal_id
+               WHERE tr.symbol = ? AND s.trading_day = ?
+               ORDER BY tr.id""",
+            (symbol, trading_day),
+        ).fetchall()
+        return [{"taken": bool(t), "result_r": r} for t, r in rows]
+
+    def reviews_with_signals(self, symbol: str, *, limit: int = 50,
+                             since_day: str | None = None) -> list[dict]:
+        """Newest journaled reviews joined to their signals (Desk Memory /
+        Preflight). Reviews without a signal_id have no setup/day context and
+        are excluded. since_day filters on the SIGNAL's trading_day
+        (YYYY-MM-DD text compares lexicographically). Read-only, no schema
+        change — deterministic inputs for journal statistics."""
+        q = ("SELECT tr.id, tr.signal_id, tr.symbol, s.trading_day, s.session, "
+             "s.decision, s.setup, s.grade, s.rr, tr.taken, tr.result_r, "
+             "tr.mistake_tags, tr.notes, s.json_signal "
+             "FROM trade_reviews tr JOIN signals s ON s.id = tr.signal_id "
+             "WHERE tr.symbol = ?")
+        params: list = [symbol]
+        if since_day is not None:
+            q += " AND s.trading_day >= ?"
+            params.append(since_day)
+        q += " ORDER BY tr.id DESC LIMIT ?"
+        params.append(limit)
+        cols = ["review_id", "signal_id", "symbol", "trading_day", "session",
+                "decision", "setup", "grade", "rr", "taken", "result_r",
+                "mistake_tags", "notes", "json_signal"]
+        out = [dict(zip(cols, r)) for r in self.conn.execute(q, params).fetchall()]
+        for row in out:
+            row["taken"] = bool(row["taken"])
+        return out
 
     def list_trade_reviews(self, symbol: str | None = None, limit: int = 50) -> list[dict]:
         q = ("SELECT id, signal_id, symbol, taken, result_r, mistake_tags, notes "
