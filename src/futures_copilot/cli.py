@@ -203,6 +203,8 @@ def cmd_prep(config: Config, args) -> int:
         print(f"    - {n['path']} [{n['chars']} chars{trunc}]")
     for m in prep["missing"]:
         print(f"    ! missing: {m}")
+    for x in prep.get("excluded", []):
+        print(f"    ! excluded: {x['path']} ({x['reason']})")
     print("vault context is explanation-only; the risk gate and you still decide")
     return 0
 

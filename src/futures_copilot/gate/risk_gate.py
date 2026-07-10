@@ -25,6 +25,7 @@ from ..config import Config
 from ..db.store import Store
 from ..features.equal_levels import equal_level_near_stop
 from ..features.market_state import MarketState
+from ..features.sessions import trading_day as signal_trading_day
 from ..strategies.base import SignalCandidate
 from ..strategies.liquidity_trap import TF_SECONDS
 from ..utils.roll_dates import is_in_roll_window
@@ -146,8 +147,16 @@ def _evaluate_candidate(
     cand: SignalCandidate, state: MarketState, store: Store, config: Config,
     passed_this_run: dict[str, int], counting_from_table: bool,
 ) -> GateDecision:
-    signal_date = datetime.fromtimestamp(cand.ts, tz=ET).date()
-    if is_in_roll_window(signal_date):
+    # Roll gate — anchored to TRADING days (the 18:00 ET boundary), not raw
+    # calendar dates, and checked at BOTH ends of the decision: the bar that
+    # created the candidate AND the horizon the decision is made at. Every
+    # date derives from a bar's UTC epoch through the ET-aware trading_day()
+    # helper — no wall clock, no local timezone, no midnight/18:00-rollover
+    # ambiguity, and no drift between the roll gate and the trading_day label
+    # the signal is persisted (and displayed) under.
+    cand_day = signal_trading_day(cand.ts, config.sessions)
+    horizon_day = signal_trading_day(state.as_of_close_ts, config.sessions)
+    if is_in_roll_window(cand_day) or is_in_roll_window(horizon_day):
         return _roll_window_reject(cand)
 
     r = config.risk

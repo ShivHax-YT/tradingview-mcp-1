@@ -5,6 +5,9 @@ sandbox; it is exercised on the user's machine via `copilot health` and
 `copilot backfill`. Everything testable without a chart is tested here.
 """
 
+import asyncio
+import threading
+
 import pytest
 
 from futures_copilot.data.tvmcp import (
@@ -69,3 +72,53 @@ def test_resolution_mapping(config):
     src = TradingViewMcpCandleSource(config)
     assert src._resolution_for("1m") == "1"
     assert src._resolution_for("1h") == "60"
+
+
+def test_close_waits_for_lifecycle_cleanup_after_cancel(config):
+    """A cancelled concurrent Future must not pre-empt in-task finalizers."""
+    src = TradingViewMcpCandleSource(config)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    src._loop = loop
+    src._thread = thread
+    src._lifecycle_done = threading.Event()
+    src._cancel_requested = threading.Event()
+    entered = threading.Event()
+    cleaned = threading.Event()
+
+    async def lifecycle():
+        src._lifecycle_task = asyncio.current_task()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Yield once: this is the cleanup turn the old close() skipped by
+            # stopping the loop as soon as the concurrent Future was cancelled.
+            await asyncio.sleep(0.05)
+            cleaned.set()
+            src._lifecycle_task = None
+            src._lifecycle_done.set()
+
+    class TimeoutThenFuture:
+        """Force close() through its timeout/cancellation fallback once."""
+
+        def __init__(self, future):
+            self.future = future
+            self.first = True
+
+        def result(self, timeout=None):
+            if self.first:
+                self.first = False
+                raise TimeoutError("forced lifecycle timeout")
+            return self.future.result(timeout)
+
+    src._lifecycle_fut = TimeoutThenFuture(
+        asyncio.run_coroutine_threadsafe(lifecycle(), loop)
+    )
+    assert entered.wait(1)
+    src.close()
+
+    assert cleaned.is_set()
+    assert not thread.is_alive()
+    assert src._loop is None

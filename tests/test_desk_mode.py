@@ -348,6 +348,54 @@ def test_session_prep_truncates_large_notes(config, tmp_path):
     assert n["truncated"] is True and len(n["content"]) == 500 and n["chars"] == 10_000
 
 
+def test_session_prep_excludes_lifecycle_notes_and_captures_snapshot(config, tmp_path):
+    vault = _fake_vault(tmp_path, count=3)
+    (vault / VAULT_ALLOWLIST[0]).write_text(
+        "\ufeff---\nstatus: deprecated\nexpires:\n---\nretired rule\n", encoding="utf-8",
+    )
+    (vault / VAULT_ALLOWLIST[1]).write_text(
+        "---\nstatus: active\nexpires: 2000-01-01\n---\nexpired rule\n", encoding="utf-8",
+    )
+    config.vault.path = str(vault)
+    config.vault.session_prep_dir = str(tmp_path / "session_prep")
+
+    prep = build_session_prep(config, "MNQ", "2026-06-24")
+
+    assert [n["path"] for n in prep["notes"]] == [VAULT_ALLOWLIST[2]]
+    assert prep["notes"][0]["lifecycle"] == {"status": "active", "expires": ""}
+    assert prep["excluded"] == [
+        {"path": VAULT_ALLOWLIST[0], "reason": "status:deprecated"},
+        {"path": VAULT_ALLOWLIST[1], "reason": "expired:2000-01-01"},
+    ]
+
+
+def test_load_session_prep_rechecks_cached_lifecycle_without_vault(config, tmp_path):
+    config.vault.path = str(tmp_path / "vault-does-not-exist")
+    config.vault.session_prep_dir = str(tmp_path / "session_prep")
+    cached = {
+        "symbol": "MNQ",
+        "trading_day": "2026-06-24",
+        "notes": [
+            {"path": "active.md", "content": "active", "lifecycle": {"status": "active", "expires": ""}},
+            {"path": "deprecated.md", "content": "old", "lifecycle": {"status": "deprecated", "expires": ""}},
+            {"path": "expired.md", "content": "old", "lifecycle": {"status": "active", "expires": "2000-01-01"}},
+            {"path": "legacy.md", "content": "old"},
+        ],
+        "excluded": [],
+    }
+    write_session_prep(cached, config)
+
+    loaded = load_session_prep(config, "MNQ", "2026-06-24")
+
+    assert loaded is not None
+    assert [n["path"] for n in loaded["notes"]] == ["active.md"]
+    assert loaded["excluded"] == [
+        {"path": "deprecated.md", "reason": "status:deprecated"},
+        {"path": "expired.md", "reason": "expired:2000-01-01"},
+        {"path": "legacy.md", "reason": "lifecycle_snapshot_missing"},
+    ]
+
+
 FORBIDDEN_OUTPUT_FIELDS = ("decision", "action", "entry", "stop", "target", "size",
                            "execute", "order", "approve")
 

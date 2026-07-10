@@ -1,4 +1,13 @@
-"""Static CME equity index contract roll-date helpers."""
+"""CME equity index contract roll-date helpers.
+
+Hand-verified static calendar for 2026-2028 plus a COMPUTED fallback
+(Monday preceding the 3rd Friday of Mar/Jun/Sep/Dec) for later years.
+The computed rule reproduces every hand-verified static entry — pinned by
+test_computed_rolls_match_static_table — so a trader in 2029+ is never
+silently unprotected. `roll_calendar_source()` tells callers (dashboard)
+whether the active year is verified or computed, so they can show a
+"verify against CME" reminder instead of a silent green check.
+"""
 
 from __future__ import annotations
 
@@ -27,23 +36,40 @@ EQUITY_INDEX_ROLL_DATES: dict[int, tuple[date, ...]] = {
     ),
 }
 
-_ROLL_DATES = tuple(d for dates in EQUITY_INDEX_ROLL_DATES.values() for d in dates)
-_LAST_ROLL_WINDOW_DATE = max(_ROLL_DATES) + timedelta(days=ROLL_WINDOW_DAYS)
+
+def _third_friday(year: int, month: int) -> date:
+    d = date(year, month, 15)                     # 3rd Friday is the 15th-21st
+    return d + timedelta(days=(4 - d.weekday()) % 7)
 
 
-def get_next_roll_date(dt: date) -> date | None:
-    """Return the next mapped roll date on or after ``dt``.
+def _computed_rolls(year: int) -> tuple[date, ...]:
+    """Monday before the 3rd Friday of each contract month (CME convention)."""
+    return tuple(_third_friday(year, m) - timedelta(days=4) for m in (3, 6, 9, 12))
 
-    The static calendar intentionally ends in 2028. Future dates return None
-    instead of guessing.
-    """
-    if dt.year > 2028:
-        return None
-    return next((roll for roll in _ROLL_DATES if roll >= dt), None)
+
+def rolls_for_year(year: int) -> tuple[date, ...]:
+    """Static (hand-verified) dates when mapped; computed dates beyond the map."""
+    return EQUITY_INDEX_ROLL_DATES.get(year, _computed_rolls(year))
+
+
+def roll_calendar_source(dt: date) -> str:
+    """'static' when dt's year is hand-verified, else 'computed'."""
+    return "static" if dt.year in EQUITY_INDEX_ROLL_DATES else "computed"
+
+
+def get_next_roll_date(dt: date) -> date:
+    """Next roll date on or after ``dt``. Never None — any year."""
+    for year in (dt.year, dt.year + 1):
+        for roll in rolls_for_year(year):
+            if roll >= dt:
+                return roll
+    return rolls_for_year(dt.year + 1)[0]         # defensive; unreachable
 
 
 def is_in_roll_window(dt: date) -> bool:
-    """Whether ``dt`` is inside a mapped +/- 3 day roll window."""
-    if dt > _LAST_ROLL_WINDOW_DATE:
-        return False
-    return any(abs((dt - roll).days) <= ROLL_WINDOW_DAYS for roll in _ROLL_DATES)
+    """Whether ``dt`` is inside a +/- ROLL_WINDOW_DAYS roll window, any year."""
+    for year in (dt.year - 1, dt.year, dt.year + 1):
+        for roll in rolls_for_year(year):
+            if abs((dt - roll).days) <= ROLL_WINDOW_DAYS:
+                return True
+    return False

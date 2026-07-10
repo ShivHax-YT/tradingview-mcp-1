@@ -66,8 +66,14 @@ class Store:
     def __enter__(self) -> "Store":
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.close()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is not None:
+                # A write blew up mid-transaction: drop the half-done tx
+                # EXPLICITLY instead of relying on close()'s implicit rollback.
+                self.conn.rollback()
+        finally:
+            self.close()
 
     # -- candles ---------------------------------------------------------------
     def upsert_candles(self, candles: list[Candle]) -> int:

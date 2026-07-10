@@ -6,6 +6,14 @@ Manual paper-trading decision-support copilot for MNQ/MES.
 > No broker execution. No live orders. No autonomous trading. No alerts.
 > WAIT is the default. This tool never places a trade, anywhere, ever.
 
+## Finalization highlights
+
+- **SQLite WAL concurrency:** readers and writers share the local store safely with a bounded busy timeout; WAL sidecar files are recovery data, never files to delete.
+- **CME roll protection:** the risk gate checks both the candidate and decision-horizon trading days across the 18:00 ET boundary. The hand-verified 2026–2028 calendar falls back to the CME convention for later years, with a verification reminder whenever the next roll date is computed.
+- **Paste-safe packet minification:** Claude receives only the external template plus a minified context block. Archival Markdown is explicitly not pasteable, and each written packet includes a sibling `.prompt.txt` artifact.
+- **Content-addressed packet freshness:** rendered packet artifacts are cached by a SHA-256 of their real inputs, so journal, bias, prep, and corrected-market-state changes invalidate stale views automatically.
+- **Obsidian integration:** when `copilot prep` builds a session cache, it reads a fixed allowlist only; inactive, superseded, and expired notes are excluded before they can reach Claude.
+
 ## The loop
 
 ```
@@ -16,7 +24,9 @@ TradingView Desktop (your CME data) ──CDP :9222──▶ vendored tradingvie
       ▶ you: approve + paper trade by hand ▶ journal ▶ memory makes packets smarter
 ```
 
-## Quick start (Windows, from the project root)
+## Paper-trading quick start (Windows, from the project root)
+
+The only execution step is yours: review the deterministic gate result, then place a paper trade manually in your simulator. Never use this project to place a live order.
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e .[dev,dashboard]
@@ -31,14 +41,16 @@ vendor\tradingview-mcp\scripts\launch_tv_debug.bat
 .venv\Scripts\copilot status                 :: coverage / freshness / gaps
 .venv\Scripts\copilot state --symbol MNQ     :: market-state JSON (levels + provenance)
 .venv\Scripts\copilot scan  --symbol MNQ     :: strategies + risk gate
-.venv\Scripts\copilot packet --latest        :: Claude packet (JSON + Markdown)
+.venv\Scripts\copilot packet --latest        :: writes archival JSON/Markdown + paste-safe .prompt.txt
 .venv\Scripts\copilot prep --symbol MNQ      :: cache vault notes for the day (optional)
 .venv\Scripts\copilot preflight --symbol MNQ :: desk-memory cache from your journal
 .venv\Scripts\copilot journal show           :: journal state
 .venv\Scripts\copilot dashboard              :: local Streamlit dashboard
 ```
 
-Tests: `.venv\Scripts\python.exe -m pytest -q` (174 tests).
+In the dashboard Packet tab, copy the “Paste THIS into Claude” block (or use the `.prompt.txt` file), then follow the risk-gate decision exactly: `WAIT` and `REJECT` mean no paper trade. Record every taken or skipped setup with `copilot journal` so the next packet can surface the relevant rules and mistakes. After changing a vault note's lifecycle fields, run `copilot prep` again; prep caches are deliberately treated as safety snapshots.
+
+Tests: `.venv\Scripts\python.exe -m pytest -q` (207 tests).
 
 Desk Mode v0.2 (golden hour, trade governor, equal-level stop filter, vault
 prep cache): see `docs/DESK_MODE.md`.

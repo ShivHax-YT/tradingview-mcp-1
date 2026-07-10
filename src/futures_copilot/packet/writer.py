@@ -22,6 +22,7 @@ into Claude manually.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,8 +43,16 @@ PACKET_TEMPLATE_FILE = Path("src/futures_copilot/packet/templates/fable_review.m
 MINIFIED_PACKET_PLACEHOLDER = "{{MINIFIED_PACKET}}"
 _TEMPLATE_CACHE: dict[str, str | None] = {"text": None}
 
-# Maximum decimal places for floats in every exported payload.
-_EXPORT_FLOAT_DECIMALS = 2
+# Decimal places for floats in every exported payload — FIELD-AWARE:
+# prices/ATRs/R-multiples on 0.25-tick instruments are exact at 2 dp;
+# 0-1 fractions need 4 dp (2 dp turns 0.125 into 0.12 and hides the
+# premium/discount midline). Ratio fields are matched by exact key or by
+# suffix at ANY nesting depth; extend _RATIO_KEYS when new fraction fields
+# join the packet.
+_PRICE_DECIMALS = 2
+_RATIO_DECIMALS = 4
+_RATIO_KEYS = frozenset({"day_range_position"})
+_RATIO_KEY_SUFFIXES = ("_position", "_ratio", "_fraction", "_pct")
 # Failed-rule lists are sliced to this many items in the minified context.
 _MAX_VIOLATED_RULES = 2
 
@@ -81,24 +90,33 @@ def load_template() -> str:
     return _TEMPLATE_CACHE["text"]
 
 
+def _decimals_for(key: str | None) -> int:
+    if key and (key in _RATIO_KEYS or key.endswith(_RATIO_KEY_SUFFIXES)):
+        return _RATIO_DECIMALS
+    return _PRICE_DECIMALS
+
+
 def _round2(value: Any) -> float:
     """Best-effort 2-decimal float; 0.0 for missing/non-numeric values."""
     try:
-        return round(float(value), _EXPORT_FLOAT_DECIMALS)
+        return round(float(value), _PRICE_DECIMALS)
     except (TypeError, ValueError):
         return 0.0
 
 
-def _round_floats(obj: Any) -> Any:
-    """Recursively round every float in a payload to 2 decimal places."""
+def _round_floats(obj: Any, key: str | None = None) -> Any:
+    """Recursively round floats: prices to 2 dp, ratio fields to 4 dp.
+
+    The owning dict key travels down into lists/tuples, so a list of
+    fractions under a ratio-named key keeps ratio precision."""
     if isinstance(obj, bool):               # bool is an int subclass — leave it
         return obj
     if isinstance(obj, float):
-        return round(obj, _EXPORT_FLOAT_DECIMALS)
+        return round(obj, _decimals_for(key))
     if isinstance(obj, dict):
-        return {k: _round_floats(v) for k, v in obj.items()}
+        return {k: _round_floats(v, k) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_round_floats(v) for v in obj]
+        return [_round_floats(v, key) for v in obj]
     return obj
 
 
@@ -141,6 +159,24 @@ def render_claude_prompt(packet: dict[str, Any]) -> str:
 def export_packet_json(packet: dict[str, Any]) -> str:
     """Whitespace-stripped, float-rounded JSON for disk/download export."""
     return json.dumps(_round_floats(packet), separators=(",", ":"), default=str)
+
+
+_HASH_EXCLUDED_KEYS = frozenset({"generated_at", "content_hash"})
+
+
+def packet_content_hash(packet: dict[str, Any]) -> str:
+    """Deterministic SHA-256 of the packet payload, minus volatile metadata.
+
+    Two packets built from identical inputs hash identically regardless of
+    WHEN they were built; any change anywhere in the inputs — an edited
+    review note under the journal upsert (same row id, same row count), a
+    retro candle backfill that rewrites VWAP at the same state ts, a bias-
+    note edit, the 13th mistake past a limit-12 list, a new prep/preflight
+    cache — changes the hash, because it changes the payload. Freshness by
+    construction, not by enumerating invalidation triggers."""
+    payload = {k: v for k, v in packet.items() if k not in _HASH_EXCLUDED_KEYS}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:
@@ -209,6 +245,9 @@ def build_packet(
     # The tight Claude-facing block travels WITH the archival packet so every
     # consumer (dashboard, files, future API calls) minifies identically.
     packet["claude_packet_min"] = minify_packet(packet)
+    # Content-addressed identity: consumers (dashboard cache, Obsidian
+    # ingestion, file dedupe) use this to detect REAL changes.
+    packet["content_hash"] = packet_content_hash(packet)
     return packet
 
 
@@ -329,18 +368,30 @@ def render_markdown(packet: dict[str, Any]) -> str:
     else:
         a("- no session prep cache for this day — run `copilot prep` before the session (optional)")
     a("")
-    a("## Your task, Claude")
+    a("## Claude prompt (do not paste this file)")
     a("")
-    a(render_claude_prompt(packet))
+    a("This markdown is the ARCHIVAL record of the packet. The Claude-facing")
+    a("prompt is the external template + minified context ONLY. It is written")
+    a("alongside this file as `*.prompt.txt` and shown in the dashboard's")
+    a("Packet tab ('paste THIS' block). Pasting this whole file into Claude")
+    a("hands it contradictory context: the sections above cite ATR/VWAP and")
+    a("multi-day levels that the template explicitly forbids mentioning.")
     a("")
-    a("Respond ONLY with JSON matching `claude_output_schema` from the JSON packet "
-      "(explanation, setup_quality, warnings, mistake_echoes, journal_note, questions_for_trader). "
-      "It has no decision field on purpose.")
+    a("The prompt file already instructs Claude to Respond ONLY with JSON "
+      "matching `claude_output_schema` (explanation, setup_quality, warnings, "
+      "mistake_echoes, journal_note, questions_for_trader) — no decision "
+      "field, on purpose.")
     a("")
     return "\n".join(lines)
 
 
 def write_packet(packet: dict[str, Any], config: Config) -> tuple[Path, Path]:
+    """Write the archival JSON + Markdown views AND the paste-ready prompt.
+
+    Returns (json_path, md_path) — signature unchanged for existing callers
+    and tests. The third artifact, `<base>.prompt.txt`, lands next to them
+    and is the ONLY file meant to be pasted into Claude: external template +
+    minified context, nothing else."""
     out_dir = config.resolve(config.app.packets_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     st = packet["market_state"]
@@ -349,8 +400,10 @@ def write_packet(packet: dict[str, Any], config: Config) -> tuple[Path, Path]:
     base = f"packet_{stamp}_{st.get('symbol','X')}" + (f"_sig{sid}" if sid else "")
     jp = out_dir / f"{base}.json"
     mp = out_dir / f"{base}.md"
+    pp = out_dir / f"{base}.prompt.txt"
     jp.write_text(export_packet_json(packet), encoding="utf-8")
     mp.write_text(render_markdown(packet), encoding="utf-8")
+    pp.write_text(render_claude_prompt(packet), encoding="utf-8")
     return jp, mp
 
 

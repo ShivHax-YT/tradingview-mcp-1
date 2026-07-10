@@ -37,6 +37,48 @@ def prep_cache_path(config: Config, symbol: str, day: str) -> Path:
     return config.resolve(config.vault.session_prep_dir) / f"{symbol}_{day}.json"
 
 
+def _front_matter(text: str) -> dict[str, str]:
+    """Cheap front-matter scalars (status/expires/...). No YAML dependency."""
+    text = text.lstrip("\ufeff")  # Windows/Obsidian UTF-8 BOM is not content.
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    out: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        key, sep, val = line.partition(":")
+        if sep:
+            out[key.strip().lower()] = val.strip().strip('"').strip("'")
+    return out
+
+
+def _lifecycle_snapshot(text: str) -> dict[str, str]:
+    """Lifecycle scalars captured before a note can be truncated for caching."""
+    fm = _front_matter(text)
+    return {
+        "status": (fm.get("status") or "active").lower(),
+        "expires": fm.get("expires") or "",
+    }
+
+
+def _lifecycle_is_ingestible(lifecycle: dict[str, str], today: str) -> tuple[bool, str]:
+    """(ok, reason) for a captured status/expiry lifecycle snapshot."""
+    status = (lifecycle.get("status") or "active").lower()
+    if status != "active":
+        return False, f"status:{status}"
+    expires = lifecycle.get("expires") or ""
+    if expires and expires < today:            # ISO dates compare lexically
+        return False, f"expired:{expires}"
+    return True, ""
+
+
+def _note_is_ingestible(text: str, today: str) -> tuple[bool, str]:
+    """Deprecated/superseded/expired notes must NOT reach Claude.
+    Notes without front matter default to active — additive, non-breaking."""
+    return _lifecycle_is_ingestible(_lifecycle_snapshot(text), today)
+
+
 def build_session_prep(config: Config, symbol: str, day: str,
                        vault_dir: str | Path | None = None) -> dict[str, Any]:
     """Read the allowlisted notes and assemble the compact cache dict."""
@@ -52,14 +94,21 @@ def build_session_prep(config: Config, symbol: str, day: str,
                           hint="check vault.path in config.yaml")
 
     max_chars = int(config.vault.max_chars_per_note)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     notes: list[dict[str, Any]] = []
     missing: list[str] = []
+    excluded: list[dict[str, str]] = []
     for rel in VAULT_ALLOWLIST:
         p = root / rel
         if not p.exists():
             missing.append(rel)
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
+        lifecycle = _lifecycle_snapshot(text)
+        ok, why = _lifecycle_is_ingestible(lifecycle, today)
+        if not ok:
+            excluded.append({"path": rel, "reason": why})
+            continue
         truncated = len(text) > max_chars
         notes.append({
             "path": rel,
@@ -67,6 +116,8 @@ def build_session_prep(config: Config, symbol: str, day: str,
             "chars": len(text),
             "truncated": truncated,
             "content": text[:max_chars],
+            # Do not re-parse possibly truncated content at packet-read time.
+            "lifecycle": lifecycle,
         })
     return {
         "prep_schema": PREP_SCHEMA_VERSION,
@@ -76,6 +127,7 @@ def build_session_prep(config: Config, symbol: str, day: str,
         "vault_root": str(root),
         "allowlist": list(VAULT_ALLOWLIST),
         "missing": missing,
+        "excluded": excluded,
         "notes": notes,
         "note": ("Vault context for Claude/Fable explanation only. It carries no "
                  "decision authority — the risk gate and the human decide."),
@@ -90,14 +142,49 @@ def write_session_prep(prep: dict[str, Any], config: Config) -> Path:
 
 
 def load_session_prep(config: Config, symbol: str, day: str | None) -> dict[str, Any] | None:
-    """Read a previously written cache. Cheap local JSON read; returns None when
-    absent or unreadable — callers must always work without it."""
+    """Read and re-check a cache without touching the vault in the live loop.
+
+    Legacy cache notes without a pre-truncation lifecycle snapshot fail closed:
+    run ``copilot prep`` to rebuild them. This keeps an expired cached note out
+    of packet context while preserving the no-live-vault-read boundary.
+    """
     if not day:
         return None
     p = prep_cache_path(config, symbol, day)
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        prep = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(prep, dict):
+        return None
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    notes = prep.get("notes") or []
+    excluded = list(prep.get("excluded") or [])
+    active_notes: list[dict[str, Any]] = []
+    for note in notes:
+        if not isinstance(note, dict):
+            excluded.append({"path": "", "reason": "invalid_cached_note"})
+            continue
+        lifecycle = note.get("lifecycle")
+        if not isinstance(lifecycle, dict):
+            excluded.append({
+                "path": str(note.get("path") or ""),
+                "reason": "lifecycle_snapshot_missing",
+            })
+            continue
+        normalized = {
+            "status": str(lifecycle.get("status") or "active"),
+            "expires": str(lifecycle.get("expires") or ""),
+        }
+        ok, why = _lifecycle_is_ingestible(normalized, today)
+        if not ok:
+            excluded.append({"path": str(note.get("path") or ""), "reason": why})
+            continue
+        note["lifecycle"] = normalized
+        active_notes.append(note)
+    prep["notes"] = active_notes
+    prep["excluded"] = excluded
+    return prep

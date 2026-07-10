@@ -74,11 +74,25 @@ def _candidate(ts: int) -> SignalCandidate:
     )
 
 
-def test_get_next_roll_date_static_map_and_future_safety():
+def test_get_next_roll_date_static_map_and_computed_fallback():
     assert get_next_roll_date(date(2026, 1, 1)) == date(2026, 3, 16)
     assert get_next_roll_date(date(2026, 3, 16)) == date(2026, 3, 16)
-    assert get_next_roll_date(date(2028, 12, 12)) is None
-    assert get_next_roll_date(date(2029, 1, 1)) is None
+    # beyond the static table the calendar is COMPUTED, never None:
+    assert get_next_roll_date(date(2028, 12, 12)) == date(2029, 3, 12)
+    assert get_next_roll_date(date(2029, 1, 1)) == date(2029, 3, 12)
+
+
+def test_computed_rolls_match_static_table():
+    from futures_copilot.utils.roll_dates import EQUITY_INDEX_ROLL_DATES, _computed_rolls
+    for year, rolls in EQUITY_INDEX_ROLL_DATES.items():
+        assert _computed_rolls(year) == rolls
+
+
+def test_2029_is_protected_by_computed_calendar():
+    assert is_in_roll_window(date(2029, 3, 12))      # Mon before 3rd Fri Mar 2029
+    assert is_in_roll_window(date(2029, 3, 9))
+    assert not is_in_roll_window(date(2029, 3, 8))
+    assert not is_in_roll_window(date(2029, 1, 1))   # unchanged from old suite
 
 
 def test_roll_window_inclusive_boundaries():
@@ -117,3 +131,25 @@ def test_risk_gate_rejects_roll_window_signal(config, store):
     assert gd.decision == "REJECT"
     assert gd.reasons == [EXPECTED_ROLL_REJECT_REASON]
     assert [check.check for check in gd.checklist] == ["roll_window_clear"]
+
+
+def test_risk_gate_uses_candidate_trading_day_after_18et(config, store):
+    # Thu 20:05 ET belongs to Fri 06-12, the first day of the 06-15 roll
+    # window. Raw calendar anchoring would incorrectly use Thu 06-11.
+    ts = et_ts(2026, 6, 11, 20, 5)
+
+    out = evaluate(_state(ts), [_candidate(ts)], store, config, persist=False)
+
+    assert out.evaluations[0].reasons == [EXPECTED_ROLL_REJECT_REASON]
+
+
+def test_risk_gate_uses_horizon_trading_day_after_18et(config, store):
+    # The candidate was created before the rollover, but the human decision is
+    # made after 18:00 ET on the next trading day inside the roll window.
+    cand_ts = et_ts(2026, 6, 11, 16, 55)
+    state = _state(cand_ts)
+    state.as_of_close_ts = et_ts(2026, 6, 11, 18, 5)
+
+    out = evaluate(state, [_candidate(cand_ts)], store, config, persist=False)
+
+    assert out.evaluations[0].reasons == [EXPECTED_ROLL_REJECT_REASON]

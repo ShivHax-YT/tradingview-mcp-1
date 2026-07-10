@@ -88,6 +88,35 @@ def test_dashboard_executes_headless_via_apptest(config, store, tmp_path):
     assert len(at.tabs) >= 6
 
 
+def test_dashboard_flags_computed_next_roll_before_static_table_ends(config, store):
+    """Late 2028 already points at a computed 2029 roll date."""
+    from streamlit.testing.v1 import AppTest
+
+    seed_long_trap(store)
+    result = scan(store, config, "MNQ", persist=True)
+    late_2028 = result.state.model_copy(update={"trading_day": "2028-12-15"})
+    store.save_market_state(
+        late_2028.symbol,
+        late_2028.ts,
+        late_2028.session,
+        late_2028.current_price,
+        late_2028.to_json(),
+    )
+    config.app.db_path = str(store.db_path)
+
+    from futures_copilot.dashboard.app import main
+
+    at = AppTest.from_function(main)
+    at.session_state["_config"] = config
+    at.run(timeout=60)
+
+    assert not at.exception, f"dashboard raised: {at.exception}"
+    assert any(
+        "past the hand-verified table" in str(caption.value)
+        for caption in at.caption
+    )
+
+
 def test_dashboard_live_mode_controls_render(config, store):
     from streamlit.testing.v1 import AppTest
 

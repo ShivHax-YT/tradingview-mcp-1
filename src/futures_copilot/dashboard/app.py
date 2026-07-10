@@ -145,10 +145,12 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
     from futures_copilot.dashboard.safe_html import h
     from futures_copilot.dashboard.theme import CSS
     from futures_copilot.packet import (
-        export_packet_json, packet_from_latest, render_markdown, write_packet,
+        export_packet_json, packet_content_hash, packet_from_latest,
+        render_claude_prompt, render_markdown, write_packet,
     )
     from futures_copilot.utils.roll_dates import (
         ROLL_WINDOW_DAYS, get_next_roll_date, is_in_roll_window,
+        roll_calendar_source,
     )
 
     st.set_page_config(page_title="Futures Copilot", page_icon="◮", layout="wide",
@@ -322,19 +324,29 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             st.markdown(f'<div class="decision {dec}">{dec}{sub}</div>', unsafe_allow_html=True)
 
         # ── contract roll indicator ──────────────────────────────────────
-        # Static CME calendar (utils/roll_dates.py). Display only — this banner
-        # never gates anything in code; it reminds the human. Anchored to the
-        # trading day on screen, falling back to today before the first scan.
-        roll_day = date.fromisoformat(state["trading_day"]) if state else date.today()
+        # Static+computed CME calendar (utils/roll_dates.py). Display only —
+        # the GATE enforces the same window in code (risk_gate). Anchored to
+        # the trading day on screen; before the first scan, falls back to the
+        # CURRENT ET TRADING DAY (18:00 ET boundary), never the machine's
+        # local calendar date.
+        if state:
+            roll_day = date.fromisoformat(state["trading_day"])
+        else:
+            from futures_copilot.features.sessions import trading_day as _tday
+            roll_day = _tday(int(time.time()), config.sessions)
         next_roll = get_next_roll_date(roll_day)
-        window_opens = (next_roll - timedelta(days=ROLL_WINDOW_DAYS)) if next_roll else None
+        window_opens = next_roll - timedelta(days=ROLL_WINDOW_DAYS)
         if is_in_roll_window(roll_day):
             st.error("🚨 ROLL WINDOW ACTIVE — No trades allowed.")
-        elif window_opens is not None and (window_opens - roll_day) <= timedelta(hours=48):
+        elif (window_opens - roll_day) <= timedelta(hours=48):
             st.warning("⚠️ Roll window approaching within 48 hours. "
                        "Monitor contract volume shift.")
         else:
             st.caption("✅ Normal contract cycle trading.")
+        if roll_calendar_source(next_roll) == "computed":
+            st.caption("Roll calendar is past the hand-verified table — dates are "
+                       "computed (Mon before 3rd Friday). Verify against CME and "
+                       "extend EQUITY_INDEX_ROLL_DATES.")
 
         if not state:
             st.info("No market state yet. Run `copilot backfill` then `copilot scan --symbol "
@@ -723,25 +735,27 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
 
         # ── packet ───────────────────────────────────────────────────────────
         with tabs[5]:
-            # Build (or reuse) the packet OUTSIDE the render fragment. The DB
-            # and prep/preflight filesystem reads run at most once per new
-            # signal/state/journal edit, and the heavy text blocks render
-            # inside an isolated fragment — live-mode refresh ticks and the
-            # rest of the dashboard never wait on them.
-            sig_row = ov["latest_signal"]
-            pkt_key = (f'{symbol}:{sig_row["id"] if sig_row else "none"}:{state.get("ts")}:'
-                       f'{len(ov["mistakes"])}:{len(ov["reviews"])}:'
-                       f'{(ov["bias"] or {}).get("bias")}:{pf["status"]}')
-            pc = st.session_state.get("_packet_cache") or {}
-            if pc.get("key") != pkt_key:
-                try:
-                    packet = packet_from_latest(store, config, symbol)
+            # Deterministic, content-addressed cache. The packet is rebuilt on
+            # every full rerun (a handful of indexed local SQLite reads + two
+            # small JSON files — milliseconds); the SHA-256 of its payload
+            # decides whether the rendered md/json/prompt artifacts are reused.
+            # generated_at is excluded from the hash, so identical inputs hit
+            # the cache; ANY real input change misses it. See
+            # packet_content_hash() in packet/writer.py for the full rationale.
+            try:
+                packet = packet_from_latest(store, config, symbol)
+                pkt_key = f"{symbol}:{packet_content_hash(packet)}"
+                pc = st.session_state.get("_packet_cache") or {}
+                if pc.get("key") != pkt_key:
                     pc = {"key": pkt_key, "packet": packet,
                           "md": render_markdown(packet),
-                          "json": export_packet_json(packet), "error": None}
-                except ValueError as e:
-                    pc = {"key": pkt_key, "packet": None, "md": "", "json": "",
-                          "error": str(e)}
+                          "json": export_packet_json(packet),
+                          "prompt": render_claude_prompt(packet),
+                          "error": None}
+                    st.session_state["_packet_cache"] = pc
+            except ValueError as e:
+                pc = {"key": f"{symbol}:error", "packet": None, "md": "",
+                      "json": "", "prompt": "", "error": str(e)}
                 st.session_state["_packet_cache"] = pc
 
             @st.fragment
@@ -754,15 +768,22 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                     if pc["error"]:
                         st.info(pc["error"])
                         return
-                    pcol1, pcol2 = st.columns([1, 1])
+                    st.markdown('<div class="microlabel">Paste THIS into Claude — template + '
+                                'minified context, nothing else</div>', unsafe_allow_html=True)
+                    st.code(pc["prompt"], language="markdown")
+                    pcol1, pcol2, pcol3 = st.columns([1, 1, 1])
                     with pcol1:
-                        if st.button("Write packet files (JSON + MD)"):
+                        st.download_button("Download Claude prompt only", pc["prompt"],
+                                           file_name="copilot_prompt.txt", mime="text/plain")
+                    with pcol2:
+                        if st.button("Write packet files (JSON + MD + prompt)"):
                             jp, mp = write_packet(pc["packet"], config)
-                            st.success(f"written: {jp.name}, {mp.name} → {jp.parent}")
+                            st.success(f"written: {jp.name}, {mp.name}, "
+                                       f"{mp.stem}.prompt.txt → {jp.parent}")
                         st.download_button("Download JSON", pc["json"],
                                            file_name="copilot_packet.json", mime="application/json")
-                    with pcol2:
-                        st.download_button("Download Markdown", pc["md"],
+                    with pcol3:
+                        st.download_button("Download Markdown (archive — do NOT paste)", pc["md"],
                                            file_name="copilot_packet.md", mime="text/markdown")
                     view = st.radio("view", ["markdown", "json"], horizontal=True,
                                     label_visibility="collapsed", key="packet_view")

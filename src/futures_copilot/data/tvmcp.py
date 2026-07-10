@@ -76,12 +76,30 @@ class TradingViewMcpCandleSource(CandleSource):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._session = None
-        self._stack = None
+        self._ready: threading.Event | None = None
+        self._shutdown: asyncio.Event | None = None
+        self._lifecycle_fut = None
+        self._lifecycle_error: BaseException | None = None
+        # Set only after _lifecycle has exited its AsyncExitStack. A concurrent
+        # Future reports cancellation before that in-task cleanup is complete.
+        self._lifecycle_done: threading.Event | None = None
+        self._lifecycle_task: asyncio.Task | None = None
+        self._cancel_requested: threading.Event | None = None
+        self._reaper_started = False
 
-    # ── connection management (background event loop, persistent session) ────
+    # ── connection management (background loop, single-task lifecycle) ───────
     def _ensure_connected(self) -> None:
         if self._session is not None:
             return
+        if self._loop is not None:
+            # A previous attempt failed half-open. Tear it down BEFORE retrying,
+            # or every retry leaks a loop + thread (+ a node child process).
+            self.close()
+            if self._loop is not None:
+                raise CdpUnreachable(
+                    "MCP bridge cleanup is still in progress",
+                    hint="wait for the prior bridge shutdown to finish, then retry",
+                )
         if not self.server_path.exists():
             raise BridgeNotFound(
                 f"MCP bridge not found at {self.server_path}",
@@ -91,44 +109,167 @@ class TradingViewMcpCandleSource(CandleSource):
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
-        try:
-            fut = asyncio.run_coroutine_threadsafe(self._connect(), self._loop)
-            fut.result(timeout=self.tv.request_timeout_s)
-        except DataSourceError:
-            raise
-        except Exception as e:  # connection-phase failures
+        self._ready = threading.Event()
+        self._lifecycle_error = None
+        self._lifecycle_done = threading.Event()
+        self._lifecycle_task = None
+        self._cancel_requested = threading.Event()
+        self._reaper_started = False
+        self._lifecycle_fut = asyncio.run_coroutine_threadsafe(self._lifecycle(), self._loop)
+        ok = self._ready.wait(timeout=self.tv.request_timeout_s)
+        if not ok or self._session is None:
+            err = self._lifecycle_error
+            self.close()   # cancels the lifecycle task -> stack unwinds IN-TASK -> node dies
+            if isinstance(err, DataSourceError):
+                raise err
             raise CdpUnreachable(
-                f"could not start/connect MCP bridge: {e}",
+                f"could not start/connect MCP bridge: {err or 'timed out'}",
                 hint="is Node installed? is TradingView Desktop running with "
                      "--remote-debugging-port=9222? (use vendor/tradingview-mcp/scripts/launch_tv_debug.bat)",
-            ) from e
+            ) from err
 
-    async def _connect(self) -> None:
-        from contextlib import AsyncExitStack
+    async def _lifecycle(self) -> None:
+        """Own the MCP transport for its WHOLE life inside ONE asyncio task.
 
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
+        mcp's stdio_client is anyio-based: its cancel scopes must be exited by
+        the same task that entered them. The previous design entered the stack
+        in one task (_connect) and aclose()d it from another (close), which
+        raises RuntimeError inside anyio — silently swallowed — and leaked the
+        spawned node child process on every close and every failed connect.
+        Here, enter and exit both happen in THIS task; close() signals and then
+        waits for this task to report that its stack has fully unwound.
+        """
+        self._lifecycle_task = asyncio.current_task()
+        try:
+            from contextlib import AsyncExitStack
 
-        self._stack = AsyncExitStack()
-        params = StdioServerParameters(
-            command=self.tv.node_command,
-            args=[str(self.server_path)],
-        )
-        read, write = await self._stack.enter_async_context(stdio_client(params))
-        self._session = await self._stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+
+            self._shutdown = asyncio.Event()
+            # close() may race the task's first turn. Observe its request here
+            # before opening any transport, rather than cancelling only the
+            # cross-thread Future proxy.
+            if self._cancel_requested is not None and self._cancel_requested.is_set():
+                raise asyncio.CancelledError
+            async with AsyncExitStack() as stack:
+                params = StdioServerParameters(
+                    command=self.tv.node_command,
+                    args=[str(self.server_path)],
+                )
+                read, write = await stack.enter_async_context(stdio_client(params))
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                self._session = session
+                self._ready.set()
+                await self._shutdown.wait()      # hold the transport open until close()
+        except BaseException as e:               # includes CancelledError from close()
+            self._lifecycle_error = e
+            if self._ready is not None:
+                self._ready.set()
+            raise
+        finally:
+            self._session = None                 # stack has unwound in-task: node is dead
+            self._lifecycle_task = None
+            if self._lifecycle_done is not None:
+                self._lifecycle_done.set()
+
+    def _cancel_lifecycle_task(self) -> None:
+        """Request cancellation of the actual lifecycle task on its own loop."""
+        task = self._lifecycle_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _clear_lifecycle(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Forget lifecycle state only if it still belongs to ``loop``."""
+        if self._loop is not loop:
+            return
+        self._session = None
+        self._loop = None
+        self._thread = None
+        self._ready = None
+        self._shutdown = None
+        self._lifecycle_fut = None
+        self._lifecycle_error = None
+        self._lifecycle_done = None
+        self._lifecycle_task = None
+        self._cancel_requested = None
+        self._reaper_started = False
+
+    def _stop_and_close_loop(
+        self, loop: asyncio.AbstractEventLoop, thread: threading.Thread | None,
+    ) -> bool:
+        """Stop, join, and close a fully unwound lifecycle loop."""
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:  # already closed
+            pass
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+        if thread is not None and thread.is_alive():
+            return False
+        try:
+            loop.close()
+        except RuntimeError:
+            return False
+        self._clear_lifecycle(loop)
+        return True
+
+    def _reap_after_lifecycle(
+        self, loop: asyncio.AbstractEventLoop, thread: threading.Thread | None,
+        done: threading.Event,
+    ) -> None:
+        """Finish cleanup later when a hung cancellation finally unwinds.
+
+        Never stop the event loop while the anyio-owned AsyncExitStack is still
+        unwinding. The daemon reaper keeps the loop alive until the lifecycle
+        task itself declares cleanup complete, then performs the normal close.
+        """
+        if self._reaper_started:
+            return
+        self._reaper_started = True
+
+        def reap() -> None:
+            done.wait()
+            while not self._stop_and_close_loop(loop, thread):
+                if self._loop is not loop:
+                    return
+                threading.Event().wait(0.1)
+
+        threading.Thread(target=reap, daemon=True).start()
 
     def close(self) -> None:
-        if self._loop is not None and self._stack is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(self._stack.aclose(), self._loop).result(timeout=10)
-            except Exception:
-                pass
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        self._session = None
-        self._stack = None
-        self._loop = None
+        loop = self._loop
+        if loop is None or self._reaper_started:
+            return
+        thread = self._thread
+        done = self._lifecycle_done
+        cleanup_complete = done is None
+        try:
+            if self._shutdown is not None:
+                loop.call_soon_threadsafe(self._shutdown.set)
+            if self._lifecycle_fut is not None:
+                try:
+                    self._lifecycle_fut.result(timeout=10)    # same-task cleanup completes
+                except BaseException:
+                    # Never cancel the concurrent Future proxy: it reports
+                    # cancellation before the actual task's async finalizers
+                    # run. Request cancellation on the MCP loop instead, then
+                    # wait for _lifecycle_done before stopping that loop.
+                    if self._cancel_requested is not None:
+                        self._cancel_requested.set()
+                    try:
+                        loop.call_soon_threadsafe(self._cancel_lifecycle_task)
+                    except RuntimeError:  # loop already closed
+                        pass
+                if done is not None:
+                    cleanup_complete = done.wait(timeout=5)
+        finally:
+            if cleanup_complete:
+                if not self._stop_and_close_loop(loop, thread) and done is not None:
+                    self._reap_after_lifecycle(loop, thread, done)
+            elif done is not None:
+                self._reap_after_lifecycle(loop, thread, done)
 
     # ── low-level tool call ───────────────────────────────────────────────────
     def _call(self, tool: str, args: dict | None = None) -> dict:
