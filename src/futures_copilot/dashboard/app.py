@@ -9,92 +9,52 @@ shows what Python computed and lets you journal what YOU decided.
 
 from __future__ import annotations
 
-import json
 import time
 
 from futures_copilot.dashboard import data as D
-from futures_copilot.dashboard.theme import CSS
 
 
-def _refresh_symbol(config, symbol: str) -> str:
+def _refresh_symbol(config, symbol: str, source) -> str:
     """Pull fresh TradingView bars, rebuild features, and run the risk gate."""
     from futures_copilot.data.collector import backfill
-    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
     from futures_copilot.db.store import Store
     from futures_copilot.gate import evaluate
     from futures_copilot.strategies import scan
 
-    source = TradingViewMcpCandleSource(config)
-    try:
-        with Store(config.db_file) as store:
-            store.init_schema()
-            report = backfill(config, source, store, [symbol])
-            result = scan(store, config, symbol, persist=True)
-            gate = evaluate(result.state, result.candidates, store, config, persist=True)
-        return f"{report.summary()} | scan: {gate.summary()}"
-    finally:
-        source.close()
+    with Store(config.db_file) as store:
+        store.init_schema()
+        report = backfill(config, source, store, [symbol])
+        result = scan(store, config, symbol, persist=True)
+        gate = evaluate(result.state, result.candidates, store, config, persist=True)
+    return f"{report.summary()} | scan: {gate.summary()}"
 
 
-def _collect_symbol(config, symbol: str) -> str:
+def _collect_symbol(config, symbol: str, source) -> str:
     """Incremental live pull: newest closed 1m bars, derived TFs, then scan/gate."""
     from futures_copilot.data.collector import collect_once
-    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
     from futures_copilot.db.store import Store
     from futures_copilot.gate import evaluate
     from futures_copilot.strategies import scan
 
-    source = TradingViewMcpCandleSource(config)
-    try:
-        with Store(config.db_file) as store:
-            store.init_schema()
-            report = collect_once(config, source, store, [symbol])
-            result = scan(store, config, symbol, persist=True)
-            gate = evaluate(result.state, result.candidates, store, config, persist=True)
-        return f"{report.summary()} | scan: {gate.summary()}"
-    finally:
-        source.close()
+    with Store(config.db_file) as store:
+        store.init_schema()
+        report = collect_once(config, source, store, [symbol])
+        result = scan(store, config, symbol, persist=True)
+        gate = evaluate(result.state, result.candidates, store, config, persist=True)
+    return f"{report.summary()} | scan: {gate.summary()}"
 
 
-def _quote_symbol(config, symbol: str) -> dict:
+def _quote_symbol(config, symbol: str, source) -> dict:
     """Fast read of the forming 1m chart price. This is display-only."""
-    from futures_copilot.data.tvmcp import TradingViewMcpCandleSource
-
-    source = TradingViewMcpCandleSource(config)
-    try:
-        q = source.get_quote(symbol)
-        price = q.get("header_price") or q.get("last") or q.get("close")
-        return {
-            "symbol": symbol,
-            "price": float(price),
-            "quote_time": q.get("time"),
-            "synced_at": time.time(),
-            "source": "TradingView quote_get",
-        }
-    finally:
-        source.close()
-
-
-def _autorefresh(seconds: int) -> None:
-    """Client-side timer: reruns the dashboard without adding Streamlit plugins."""
-    import streamlit.components.v1 as components
-
-    ms = max(1, int(seconds)) * 1000
-    components.html(
-        f"""
-        <script>
-        const key = "copilot-live-refresh";
-        if (window.parent[key]) {{
-          window.parent.clearTimeout(window.parent[key]);
-        }}
-        window.parent[key] = window.parent.setTimeout(() => {{
-          window.parent.location.reload();
-        }}, {ms});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
+    q = source.get_quote(symbol)
+    price = q.get("header_price") or q.get("last") or q.get("close")
+    return {
+        "symbol": symbol,
+        "price": float(price),
+        "quote_time": q.get("time"),
+        "synced_at": time.time(),
+        "source": "TradingView quote_get",
+    }
 
 
 def _candles_fig(df, state):
@@ -142,10 +102,11 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
 
     from futures_copilot.dashboard.charts import candles_fig as _candles_fig
     from futures_copilot.dashboard import data as D
+    from futures_copilot.dashboard.mcp_resource import session_mcp_source
     from futures_copilot.dashboard.safe_html import h
     from futures_copilot.dashboard.theme import CSS
     from futures_copilot.packet import (
-        export_packet_json, packet_content_hash, packet_from_latest,
+        PacketError, export_packet_json, packet_content_hash, packet_from_latest,
         render_claude_prompt, render_markdown, write_packet,
     )
     from futures_copilot.utils.roll_dates import (
@@ -161,6 +122,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
     if config is None:
         config = D.load_config(D.find_config())
         st.session_state["_config"] = config
+
+    def mcp_source():
+        return session_mcp_source(str(config.root.resolve()), _config=config)
 
     # ── sidebar ──────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -209,7 +173,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                 changed = False
                 if now - last_quote >= price_interval:
                     try:
-                        st.session_state["live_quote"] = _quote_symbol(config, symbol)
+                        st.session_state["live_quote"] = _quote_symbol(config, symbol, mcp_source())
                         st.session_state["live_last_quote_ts"] = time.time()
                         st.session_state["live_quote_error"] = None
                         changed = True
@@ -222,7 +186,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                 if now - last_collect >= scan_interval:
                     with st.spinner("Live Mode: collecting closed 1m bars and rescanning..."):
                         try:
-                            st.session_state["live_status"] = _collect_symbol(config, symbol)
+                            st.session_state["live_status"] = _collect_symbol(
+                                config, symbol, mcp_source(),
+                            )
                             st.session_state["live_last_collect_ts"] = time.time()
                             st.session_state["live_error"] = None
                             changed = True
@@ -257,7 +223,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
         if st.button("Refresh data", use_container_width=True, key="refresh_data"):
             with st.spinner("Pulling TradingView bars and rescanning..."):
                 try:
-                    st.session_state["refresh_status"] = _refresh_symbol(config, symbol)
+                    st.session_state["refresh_status"] = _refresh_symbol(
+                        config, symbol, mcp_source(),
+                    )
                     st.session_state["live_status"] = st.session_state["refresh_status"]
                     st.session_state["live_last_collect_ts"] = time.time()
                     st.session_state.pop("refresh_error", None)
@@ -272,6 +240,15 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             st.success(msg)
         if err := st.session_state.pop("refresh_error", None):
             st.error(err)
+        if st.button("🔄 Clear Local Cache", use_container_width=True, key="clear_local_cache"):
+            # Drop all content signatures and rendered packet artifacts, release
+            # the session MCP bridge, and force every active local file/SQLite
+            # input to be reread on the immediate clean rerun.
+            st.session_state.pop("_packet_cache", None)
+            session_mcp_source.clear()
+            st.cache_data.clear()
+            st.session_state.clear()
+            st.rerun()
         st.write("")
         st.markdown(
             '<div class="safety"><b>Safety rails.</b> WAIT is the default. Decisions come from '
@@ -753,7 +730,7 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                           "prompt": render_claude_prompt(packet),
                           "error": None}
                     st.session_state["_packet_cache"] = pc
-            except ValueError as e:
+            except (PacketError, ValueError) as e:
                 pc = {"key": f"{symbol}:error", "packet": None, "md": "",
                       "json": "", "prompt": "", "error": str(e)}
                 st.session_state["_packet_cache"] = pc

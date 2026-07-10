@@ -145,7 +145,7 @@ def _roll_window_reject(cand: SignalCandidate) -> GateDecision:
 
 def _evaluate_candidate(
     cand: SignalCandidate, state: MarketState, store: Store, config: Config,
-    passed_this_run: dict[str, int], counting_from_table: bool,
+    passed_this_run: dict[str, int], counting_from_table: bool, history=None,
 ) -> GateDecision:
     # Roll gate — anchored to TRADING days (the 18:00 ET boundary), not raw
     # calendar dates, and checked at BOTH ends of the decision: the bar that
@@ -222,8 +222,9 @@ def _evaluate_candidate(
         check("golden_hour_allowed", True, "golden hour not enforced")
 
     # trade governor (Desk Mode): journaled outcomes end the day early.
+    history = history or store
     gov_clear, gov_detail, _gov = trade_governor_status(
-        store, config, cand.symbol, state.trading_day)
+        history, config, cand.symbol, state.trading_day)
     check("trade_governor_clear", gov_clear, gov_detail)
 
     # equal high/low stop magnet (Desk Mode): stop must not sit inside an
@@ -271,8 +272,8 @@ def _evaluate_candidate(
     # already contains earlier passes from THIS run — adding passed_this_run
     # again would double-count. The in-run counter only matters when
     # persist=False (dry runs).
-    sess_count = store.count_passing_signals(cand.symbol, state.trading_day, cand.session)
-    day_count = store.count_passing_signals(cand.symbol, state.trading_day, None)
+    sess_count = history.count_passing_signals(cand.symbol, state.trading_day, cand.session)
+    day_count = history.count_passing_signals(cand.symbol, state.trading_day, None)
     if not counting_from_table:
         sess_count += passed_this_run.get(f"s:{cand.session}", 0)
         day_count += passed_this_run.get("day", 0)
@@ -302,7 +303,7 @@ def _evaluate_candidate(
 
 def evaluate(
     state: MarketState, candidates: list[SignalCandidate], store: Store, config: Config,
-    persist: bool = True,
+    persist: bool = True, history=None,
 ) -> GateOutput:
     """Gate a scan's candidates. Persists LONG/SHORT/REJECT signal rows
     (decision written here and ONLY here). WAIT is returned, not persisted."""
@@ -315,7 +316,7 @@ def evaluate(
 
     for cand in ordered:
         gd = _evaluate_candidate(cand, state, store, config, passed_this_run,
-                                 counting_from_table=persist)
+                                 counting_from_table=persist, history=history)
         if gd.decision in ("LONG", "SHORT"):
             passed_this_run[f"s:{cand.session}"] = passed_this_run.get(f"s:{cand.session}", 0) + 1
             passed_this_run["day"] = passed_this_run.get("day", 0) + 1

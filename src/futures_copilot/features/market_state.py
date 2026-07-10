@@ -20,6 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..config import Config
+from ..data.resample import TF_SECONDS
 from ..db.store import Store
 from ..errors import DataSourceError
 from ..utils.roll_dates import is_in_roll_window
@@ -67,10 +68,22 @@ class MarketState(BaseModel):
         return json.dumps(self.model_dump(), indent=2, default=str)
 
 
-def _df_as_of(store: Store, symbol: str, tf: str, as_of_ts: int | None):
+def _df_as_of(
+    store: Store,
+    symbol: str,
+    tf: str,
+    as_of_ts: int | None,
+    *,
+    horizon_ts: int | None = None,
+):
     df = store.get_candles_df(symbol, tf)
     if as_of_ts is not None and not df.empty:
-        df = df[df["ts"] <= as_of_ts]
+        if horizon_ts is None or tf == "1m":
+            df = df[df["ts"] <= as_of_ts]
+        else:
+            tf_seconds = TF_SECONDS.get(tf)
+            if tf_seconds is not None:
+                df = df[df["ts"] + tf_seconds <= horizon_ts]
     return df
 
 
@@ -87,12 +100,16 @@ def build_market_state(store: Store, config: Config, symbol: str, as_of_ts: int 
     last = df1.iloc[-1]
     last_ts = int(last["ts"])
     horizon = last_ts + 60
+    filter_as_of = last_ts if as_of_ts is None else as_of_ts
     price = float(last["close"])
     day = trading_day(last_ts, scfg)
     roll_window = is_in_roll_window(day)
 
     # Multi-timeframe frames, all as-of filtered — the fallback can never see future bars.
-    dfs = {tf: _df_as_of(store, symbol, tf, as_of_ts) for tf in LEVEL_TF_PREFERENCE}
+    dfs = {
+        tf: _df_as_of(store, symbol, tf, filter_as_of, horizon_ts=horizon)
+        for tf in LEVEL_TF_PREFERENCE
+    }
     dfs["1m"] = df1
 
     level_sources: dict[str, str | None] = {}
@@ -140,7 +157,7 @@ def build_market_state(store: Store, config: Config, symbol: str, as_of_ts: int 
     if d_res and d_res[0][0] > d_res[0][1]:
         d_hi, d_lo = d_res[0]
         prem = premium_discount(price, d_lo, d_hi)
-        pos = round(position_in_range(price, d_lo, d_hi), 3)
+        pos = position_in_range(price, d_lo, d_hi)
 
     # 5m structure context (confirmed swings only — no lookahead)
     swing_hi = swing_lo = None
@@ -189,7 +206,7 @@ def build_market_state(store: Store, config: Config, symbol: str, as_of_ts: int 
         last_swing_low_5m=swing_lo,
         open_fvgs_5m=fvg_dicts,
         bar_counts={
-            tf: int(len(_df_as_of(store, symbol, tf, as_of_ts)))
+            tf: int(len(_df_as_of(store, symbol, tf, filter_as_of, horizon_ts=horizon)))
             for tf in config.timeframes.canonical
         },
         reliable=not roll_window,

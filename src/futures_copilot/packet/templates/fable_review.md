@@ -51,3 +51,5 @@ appear in the minified context.
 ## Minified context
 
 {{MINIFIED_PACKET}}
+
+CRITICAL: If px is 0 or invalid, declare the packet invalid and stop evaluation immediately.

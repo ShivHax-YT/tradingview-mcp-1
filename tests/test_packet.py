@@ -6,7 +6,8 @@ import pytest
 
 from futures_copilot.gate import evaluate
 from futures_copilot.packet import (
-    CLAUDE_OUTPUT_SCHEMA, build_packet, packet_from_latest, render_markdown, write_packet,
+    CLAUDE_OUTPUT_SCHEMA, PacketError, build_packet, packet_from_latest,
+    render_markdown, write_packet,
 )
 from futures_copilot.strategies import scan
 
@@ -76,6 +77,52 @@ def test_wait_packet_without_signals(config, store):
     assert packet["candidate"] is None
     md = render_markdown(packet)
     assert "WAIT" in md
+
+
+@pytest.mark.parametrize("bad_price", [None, "not-a-number", 0, -1, float("nan"), float("inf"), True])
+def test_packet_fails_closed_on_invalid_current_price(config, store, bad_price):
+    state = {"symbol": "MNQ", "trading_day": "2026-06-24", "current_price": bad_price}
+    gate = {"decision": "WAIT", "signal_id": None, "checklist": [], "reasons": []}
+
+    with pytest.raises(PacketError):
+        build_packet(store, config, state=state, gate=gate, candidate=None)
+
+
+def test_packet_from_latest_fails_closed_on_invalid_hydrated_price(config, store, gated):
+    result, _gate = gated
+    bad_state = result.state.model_dump()
+    bad_state["current_price"] = 0.0
+    store.save_market_state("MNQ", result.state.ts + 60, result.state.session, 0.0,
+                            json.dumps(bad_state))
+
+    with pytest.raises(PacketError):
+        packet_from_latest(store, config, "MNQ")
+
+
+def test_fable_template_has_absolute_invalid_price_directive():
+    from futures_copilot.packet import load_template
+    from futures_copilot.packet.writer import _TEMPLATE_CACHE
+
+    _TEMPLATE_CACHE["text"] = None
+    directive = ("CRITICAL: If px is 0 or invalid, declare the packet invalid "
+                 "and stop evaluation immediately.")
+    assert directive in load_template()
+
+
+def test_template_lookup_prefers_module_path_over_cwd(tmp_path, monkeypatch):
+    from futures_copilot.packet import load_template
+    from futures_copilot.packet.writer import _TEMPLATE_CACHE
+
+    poison = tmp_path / "src" / "futures_copilot" / "packet" / "templates"
+    poison.mkdir(parents=True)
+    (poison / "fable_review.md").write_text("POISON CWD TEMPLATE", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _TEMPLATE_CACHE["text"] = None
+
+    text = load_template()
+
+    assert "POISON CWD TEMPLATE" not in text
+    assert "Fable Review" in text
 
 
 def test_similar_setups_surface_in_packet(config, store, gated):

@@ -63,3 +63,15 @@ class UnsupportedTimeframe(DataSourceError):
 
 class FixtureError(DataSourceError):
     code = "FIXTURE_ERROR"
+
+
+class PacketError(CopilotError):
+    """A prompt packet cannot be built without trustworthy required data."""
+
+    code = "PACKET_ERROR"
+
+
+class ReviewError(CopilotError):
+    """A deterministic journal review could not be generated or written."""
+
+    code = "REVIEW_ERROR"

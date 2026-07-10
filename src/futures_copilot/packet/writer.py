@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..config import Config
 from ..db.store import Store
+from ..errors import PacketError
 from ..features.sessions import to_et
 from ..memory import similar_setups
 from ..prep import load_session_prep
@@ -77,15 +79,13 @@ CLAUDE_OUTPUT_SCHEMA: dict[str, Any] = {
 def load_template() -> str:
     """Read the Fable review prompt template (cached after first read).
 
-    Reads the spec'd repo-relative path when running from the project root;
-    falls back to a module-relative path so installed/`streamlit run`/other-cwd
-    invocations resolve the same file.
+    The installed module-relative template is authoritative. The repo-relative
+    constant remains a compatibility fallback for unusual source layouts.
     """
     if _TEMPLATE_CACHE["text"] is None:
-        if PACKET_TEMPLATE_FILE.exists():
-            template_text = Path("src/futures_copilot/packet/templates/fable_review.md").read_text(encoding="utf-8")
-        else:
-            template_text = (Path(__file__).resolve().parent / "templates" / "fable_review.md").read_text(encoding="utf-8")
+        module_template = Path(__file__).resolve().parent / "templates" / "fable_review.md"
+        template_path = module_template if module_template.exists() else PACKET_TEMPLATE_FILE
+        template_text = template_path.read_text(encoding="utf-8")
         _TEMPLATE_CACHE["text"] = template_text
     return _TEMPLATE_CACHE["text"]
 
@@ -102,6 +102,19 @@ def _round2(value: Any) -> float:
         return round(float(value), _PRICE_DECIMALS)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _valid_current_price(value: Any) -> float:
+    """Return a finite positive packet price or fail closed."""
+    if isinstance(value, bool):
+        raise PacketError("current_price must be numeric and greater than zero")
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PacketError("current_price must be numeric and greater than zero") from exc
+    if not math.isfinite(price) or price <= 0.0:
+        raise PacketError("current_price must be finite and greater than zero")
+    return price
 
 
 def _round_floats(obj: Any, key: str | None = None) -> Any:
@@ -139,7 +152,7 @@ def minify_packet(packet: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "sym": str(state.get("symbol", "")),
-        "px": _round2(state.get("current_price")),
+        "px": round(_valid_current_price(state.get("current_price")), _PRICE_DECIMALS),
         "act": str(gate.get("decision", "WAIT")),
         "rr": _round2(cand.get("rr")),
         "v_rules": v_rules[:_MAX_VIOLATED_RULES],
@@ -197,6 +210,8 @@ def build_packet(
 ) -> dict[str, Any]:
     """Assemble the packet dict. `state`/`gate`/`candidate` are plain dicts so
     the builder works both live (from a scan) and offline (from DB rows)."""
+    state = dict(state)
+    state["current_price"] = _valid_current_price(state.get("current_price"))
     symbol = state.get("symbol", "MNQ")
     trading_day = state.get("trading_day")
 
@@ -435,6 +450,7 @@ def packet_from_latest(store: Store, config: Config, symbol: str) -> dict[str, A
     if ms is None:
         raise ValueError(f"no market state stored for {symbol}; run `copilot scan` first")
     state = json.loads(ms["json_state"])
+    state["current_price"] = _valid_current_price(state.get("current_price"))
 
     sigs = store.latest_signals(symbol, limit=10)
     if not sigs:

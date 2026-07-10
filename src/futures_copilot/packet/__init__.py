@@ -1,5 +1,6 @@
 """Claude prompt-packet layer. Claude explains — it never decides."""
 
+from ..errors import PacketError
 from .writer import (
     CLAUDE_OUTPUT_SCHEMA,
     build_packet,
@@ -15,6 +16,7 @@ from .writer import (
 
 __all__ = [
     "CLAUDE_OUTPUT_SCHEMA",
+    "PacketError",
     "build_packet",
     "export_packet_json",
     "load_template",

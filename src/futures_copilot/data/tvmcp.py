@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..config import Config
@@ -86,6 +89,57 @@ class TradingViewMcpCandleSource(CandleSource):
         self._lifecycle_task: asyncio.Task | None = None
         self._cancel_requested: threading.Event | None = None
         self._reaper_started = False
+        self._chart_mutex = threading.RLock()
+        self._workspace_lock_path = config.resolve(".copilot.lock")
+
+    @contextmanager
+    def _chart_transaction(self):
+        """Hold an OS-backed workspace lock across chart mutation and read.
+
+        The byte-range lock is released by the operating system on crashes, so
+        the visible ``.copilot.lock`` file may safely remain in the workspace.
+        """
+        timeout_s = max(1.0, float(self.tv.request_timeout_s))
+        deadline = time.monotonic() + timeout_s
+        self._workspace_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._chart_mutex, self._workspace_lock_path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            acquired = False
+            while not acquired:
+                handle.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:  # pragma: no cover - Windows is the product platform
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise CdpUnreachable(
+                            f"TradingView chart workspace is locked by another copilot session: "
+                            f"{self._workspace_lock_path}",
+                            hint="close the other collector/dashboard session or wait for its chart read to finish",
+                        ) from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:  # pragma: no cover - Windows is the product platform
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     # ── connection management (background loop, single-task lifecycle) ───────
     def _ensure_connected(self) -> None:
@@ -287,6 +341,12 @@ class TradingViewMcpCandleSource(CandleSource):
                 hint="TradingView Desktop may be closed or the CDP port blocked; "
                      "relaunch with launch_tv_debug.bat and retry",
             ) from None
+        except Exception as exc:
+            raise CdpUnreachable(
+                f"bridge transport dropped during {tool}: {exc}",
+                hint="the dashboard will reconnect once; if it still fails, relaunch TradingView "
+                     "with launch_tv_debug.bat",
+            ) from exc
 
         texts = [c.text for c in result.content if getattr(c, "type", "") == "text"]
         payload: dict = {}
@@ -334,8 +394,8 @@ class TradingViewMcpCandleSource(CandleSource):
                 f"symbol {symbol!r} not defined in config.yaml symbols section"
             ) from None
 
-    def ensure_chart(self, symbol: str, timeframe: str) -> None:
-        """Point the chart at (symbol, timeframe) and VERIFY it took effect."""
+    def _ensure_chart_locked(self, symbol: str, timeframe: str) -> None:
+        """Point the chart at (symbol, timeframe); caller owns chart lock."""
         chart_symbol = self._chart_symbol_for(symbol)
         resolution = self._resolution_for(timeframe)
         want_root = _canonical_symbol_root(chart_symbol)
@@ -363,13 +423,19 @@ class TradingViewMcpCandleSource(CandleSource):
                      "and that your data package covers this symbol",
             )
 
+    def ensure_chart(self, symbol: str, timeframe: str) -> None:
+        """Point the chart at (symbol, timeframe) under the workspace lock."""
+        with self._chart_transaction():
+            self._ensure_chart_locked(symbol, timeframe)
+
     def get_candles(self, symbol: str, timeframe: str, count: int) -> list[Candle]:
         if count < 1:
             raise NoBarsReturned("count must be >= 1")
         capped = min(count + 1, self.tv.max_bars_per_call)  # +1: last bar gets dropped as forming
 
-        self.ensure_chart(symbol, timeframe)
-        payload = self._call("data_get_ohlcv", {"count": capped, "summary": False})
+        with self._chart_transaction():
+            self._ensure_chart_locked(symbol, timeframe)
+            payload = self._call("data_get_ohlcv", {"count": capped, "summary": False})
         bars = payload.get("bars") or []
         if not bars:
             raise NoBarsReturned(
@@ -400,8 +466,9 @@ class TradingViewMcpCandleSource(CandleSource):
 
     def get_quote(self, symbol: str) -> dict:
         """Read the current 1m chart quote without storing the forming bar."""
-        self.ensure_chart(symbol, self.config.data.collect.timeframe)
-        payload = self._call("quote_get")
+        with self._chart_transaction():
+            self._ensure_chart_locked(symbol, self.config.data.collect.timeframe)
+            payload = self._call("quote_get")
         for key in ("time",):
             if payload.get(key) is not None:
                 payload[key] = _normalize_epoch_seconds(payload[key])

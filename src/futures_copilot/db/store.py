@@ -15,27 +15,37 @@ SCHEMA_VERSION = "1"
 
 
 class Store:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.read_only = read_only
+        if read_only:
+            uri = self.db_path.resolve().as_uri() + "?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True)
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(str(self.db_path))
         self.conn.execute("PRAGMA foreign_keys = ON")
         # Collector loop + dashboard (+ live mode) share this file. Without a
         # busy timeout a concurrent write surfaces instantly as
         # "database is locked"; with it, SQLite retries for up to 5s.
         self.conn.execute("PRAGMA busy_timeout = 5000")
-        try:
-            # WAL = better concurrency (collector writing while dashboard reads).
-            # Some filesystems (network mounts) can't do WAL; DELETE mode is fine there.
-            self.conn.execute("PRAGMA journal_mode = WAL;")
-        except sqlite3.OperationalError:
-            self.conn.execute("PRAGMA journal_mode = DELETE;")
-        self.conn.execute("PRAGMA synchronous = NORMAL;")
+        if read_only:
+            self.conn.execute("PRAGMA query_only = ON;")
+        else:
+            try:
+                # WAL = better concurrency (collector writing while dashboard reads).
+                # Some filesystems (network mounts) can't do WAL; DELETE mode is fine there.
+                self.conn.execute("PRAGMA journal_mode = WAL;")
+            except sqlite3.OperationalError:
+                self.conn.execute("PRAGMA journal_mode = DELETE;")
+            self.conn.execute("PRAGMA synchronous = NORMAL;")
         self.conn.execute("PRAGMA cache_size = -50000;")
         self.conn.commit()
 
     # -- lifecycle -------------------------------------------------------------
     def init_schema(self) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("cannot initialize schema through a read-only Store")
         self.conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         self._dedupe_trade_reviews_by_signal()
         self.conn.execute(

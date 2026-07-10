@@ -10,6 +10,8 @@
     copilot packet [--latest]           write Claude prompt packet (JSON + Markdown)
     copilot prep --symbol MNQ --day YYYY-MM-DD   cache allowlisted vault notes for the day
     copilot preflight --symbol MNQ --day YYYY-MM-DD   build the desk-memory cache from the journal
+    copilot backtest --symbol MNQ --start YYYY-MM-DD --end YYYY-MM-DD
+    copilot review --weekly             write the deterministic Obsidian weekly review
     copilot journal <bias|review|result|mistake|show>   trading journal
     copilot dashboard                   launch the local Streamlit dashboard
     copilot load-fixtures <csv>         load fixture bars (tests/offline dev ONLY)
@@ -238,6 +240,30 @@ def cmd_preflight(config: Config, args) -> int:
     return 0
 
 
+def cmd_backtest(config: Config, args) -> int:
+    """Run deterministic offline replay; never writes simulation rows."""
+    from .backtest import parse_cli_range, render_markdown, run_backtest
+
+    start_ts, end_ts = parse_cli_range(args.start, args.end)
+    with Store(config.db_file, read_only=True) as store:
+        report = run_backtest(store, config, args.symbol, start_ts, end_ts)
+    print(render_markdown(report))
+    return 0
+
+
+def cmd_review(config: Config, args) -> int:
+    from datetime import date
+
+    from .weekly_review import write_weekly_review
+
+    as_of = date.fromisoformat(args.as_of) if args.as_of else None
+    with Store(config.db_file, read_only=True) as store:
+        path = write_weekly_review(store, config, as_of=as_of)
+    print(f"weekly review written: {path}")
+    print("local SQLite only; paste any Claude narrative manually inside the marked block")
+    return 0
+
+
 def cmd_journal(config: Config, args) -> int:
     import json as _json
 
@@ -358,6 +384,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--symbol", default="MNQ")
     p.add_argument("--day", default=None, help="trading day YYYY-MM-DD (default: today's)")
 
+    p = sub.add_parser("backtest", help="offline deterministic Golden Hour historical replay")
+    p.add_argument("--symbol", default="MNQ")
+    p.add_argument("--start", required=True,
+                   help="ET start boundary: YYYY-MM-DD or ISO datetime (inclusive)")
+    p.add_argument("--end", required=True,
+                   help="ET end boundary: YYYY-MM-DD includes the full day; datetime is exclusive")
+
+    p = sub.add_parser("review", help="deterministic journal performance synthesis")
+    p.add_argument("--weekly", action="store_true", required=True,
+                   help="write the preceding seven trading days to the Obsidian vault")
+    p.add_argument("--as-of", default=None, help="report date YYYY-MM-DD (default: today ET)")
+
     pj = sub.add_parser("journal", help="trading journal: bias / review / result / mistake / show")
     jsub = pj.add_subparsers(dest="journal_command", required=True)
 
@@ -410,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
         "packet": cmd_packet,
         "prep": cmd_prep,
         "preflight": cmd_preflight,
+        "backtest": cmd_backtest,
+        "review": cmd_review,
         "journal": cmd_journal,
         "dashboard": cmd_dashboard,
         "load-fixtures": cmd_load_fixtures,

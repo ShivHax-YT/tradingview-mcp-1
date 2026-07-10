@@ -133,6 +133,34 @@ def test_market_state_as_of_replay(config, store):
     assert state.ts <= as_of                     # never uses future bars
 
 
+def test_day_range_position_preserves_source_precision(config, store, monkeypatch):
+    _seed(store)
+    monkeypatch.setattr(
+        "futures_copilot.features.market_state.position_in_range",
+        lambda *_args: 0.123456,
+    )
+
+    state = build_market_state(store, config, "MNQ")
+
+    assert state.day_range_position == 0.123456
+
+
+def test_as_of_replay_excludes_unclosed_higher_timeframe_bar(config, store):
+    _seed(store)
+    as_of = et_ts(2026, 6, 24, 10, 36)
+    # This 15m bar opens before the replay horizon but does not close until
+    # 10:45. Its impossible extreme must remain invisible at 10:37.
+    store.upsert_candles([
+        _candle("15m", et_ts(2026, 6, 24, 10, 30), 23000, 99999, 1, 23000),
+    ])
+
+    state = build_market_state(store, config, "MNQ", as_of_ts=as_of)
+
+    assert state.session_levels["ny"] is not None
+    assert state.session_levels["ny"].high < 99999
+    assert state.session_levels["ny"].low > 1
+
+
 def test_as_of_replay_no_future_leak_overnight(config, store):
     """Replayed at 23:00 during asia: the developing day range must be clipped
     to what existed then (hi 23040, NOT the 23080 made later at ~01:30), and

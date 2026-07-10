@@ -86,6 +86,30 @@ def test_dashboard_executes_headless_via_apptest(config, store, tmp_path):
     assert "LONG" in md                          # decision banner rendered
     assert "Level ladder" in md
     assert len(at.tabs) >= 6
+    assert any(button.label == "🔄 Clear Local Cache" for button in at.button)
+
+
+def test_dashboard_clear_local_cache_drops_session_state(config, store):
+    from streamlit.testing.v1 import AppTest
+
+    seed_long_trap(store)
+    result = scan(store, config, "MNQ", persist=True)
+    evaluate(result.state, result.candidates, store, config, persist=True)
+    config.app.db_path = str(store.db_path)
+
+    from futures_copilot.dashboard.app import main
+
+    at = AppTest.from_function(main)
+    at.session_state["_config"] = config
+    at.session_state["stale_sha_signature"] = "stale"
+    at.session_state["_packet_cache"] = {"key": "stale", "error": None}
+    at.run(timeout=60)
+    button = next(button for button in at.button if button.label == "🔄 Clear Local Cache")
+    button.click().run(timeout=60)
+
+    assert "stale_sha_signature" not in at.session_state
+    packet_cache = at.session_state["_packet_cache"] if "_packet_cache" in at.session_state else {}
+    assert packet_cache.get("key") != "stale"
 
 
 def test_dashboard_flags_computed_next_roll_before_static_table_ends(config, store):

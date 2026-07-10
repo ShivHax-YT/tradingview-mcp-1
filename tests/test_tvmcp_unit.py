@@ -7,6 +7,7 @@ sandbox; it is exercised on the user's machine via `copilot health` and
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -122,3 +123,36 @@ def test_close_waits_for_lifecycle_cleanup_after_cancel(config):
     assert cleaned.is_set()
     assert not thread.is_alive()
     assert src._loop is None
+
+
+def test_workspace_chart_lock_serializes_sources(config, tmp_path):
+    config.root = tmp_path
+    first = TradingViewMcpCandleSource(config)
+    second = TradingViewMcpCandleSource(config)
+    entered = threading.Event()
+    release = threading.Event()
+    second_entered = threading.Event()
+
+    def hold_first():
+        with first._chart_transaction():
+            entered.set()
+            assert release.wait(2)
+
+    def enter_second():
+        assert entered.wait(2)
+        with second._chart_transaction():
+            second_entered.set()
+
+    t1 = threading.Thread(target=hold_first)
+    t2 = threading.Thread(target=enter_second)
+    t1.start()
+    t2.start()
+    assert entered.wait(2)
+    time.sleep(0.1)
+    assert not second_entered.is_set()
+    release.set()
+    t1.join(2)
+    t2.join(2)
+
+    assert second_entered.is_set()
+    assert (tmp_path / ".copilot.lock").exists()

@@ -188,6 +188,21 @@ class MemoryConfig(BaseModel):
     vector: VectorMemoryConfig = Field(default_factory=VectorMemoryConfig)
 
 
+class SlippageConfig(BaseModel):
+    """Conservative adverse fills expressed in contract ticks."""
+
+    entry_ticks: int = 1
+    stop_ticks: int = 2
+    target_ticks: int = 1
+
+
+class BacktestConfig(BaseModel):
+    slippage: dict[str, SlippageConfig] = Field(default_factory=lambda: {
+        "MNQ": SlippageConfig(entry_ticks=1, stop_ticks=2, target_ticks=1),
+        "MES": SlippageConfig(entry_ticks=1, stop_ticks=1, target_ticks=1),
+    })
+
+
 class AppConfig(BaseModel):
     db_path: str = "data/copilot.db"
     timezone: str = "America/New_York"
@@ -206,6 +221,7 @@ class Config(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     vault: VaultConfig = Field(default_factory=VaultConfig)
     preflight: PreflightConfig = Field(default_factory=PreflightConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
 
     # Directory containing config.yaml; relative paths resolve against it.
     root: Path = Field(default=Path("."))

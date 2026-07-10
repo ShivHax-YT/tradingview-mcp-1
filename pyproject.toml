@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-dashboard = ["streamlit>=1.35", "plotly>=5.20"]
+dashboard = ["streamlit>=1.58", "plotly>=5.20"]
 
 [project.scripts]
 copilot = "futures_copilot.cli:main"
