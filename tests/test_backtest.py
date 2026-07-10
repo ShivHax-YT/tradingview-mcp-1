@@ -109,6 +109,34 @@ def test_replay_is_exactly_deterministic(config, store):
     assert first == second
 
 
+def test_session_filter_excludes_out_of_session_entries(config, store):
+    start = et_ts(2026, 6, 24, 9, 30)
+    _bars(store, start)
+    candidate = _candidate(start)
+
+    def scanner(_store, _config, _symbol, *, as_of_ts, persist):
+        return SimpleNamespace(
+            state=SimpleNamespace(trading_day="2026-06-24", as_of_close_ts=as_of_ts + 60),
+            candidates=[candidate],
+        )
+
+    def gate(state, candidates, _store, _config, *, persist, history, now_ts):
+        decisions = [GateDecision("LONG", c, [], [], [], []) for c in candidates]
+        return GateOutput("LONG" if decisions else "WAIT", decisions[0] if decisions else None, decisions)
+
+    ny = run_backtest(
+        store, config, "MNQ", start, start + 180, session="ny",
+        _scanner=scanner, _gate=gate,
+    )
+    asia = run_backtest(
+        store, config, "MNQ", start, start + 180, session="asia",
+        _scanner=scanner, _gate=gate,
+    )
+    assert len(ny.trades) == 1 and asia.trades == []
+    assert ny.metrics["by_session"]["ny"]["accepted"] == 1
+    assert asia.session_filter == "asia"
+
+
 def test_transient_rejection_is_reevaluated_until_candidate_passes(config, store):
     start = et_ts(2026, 6, 24, 9, 30)
     _bars(store, start)

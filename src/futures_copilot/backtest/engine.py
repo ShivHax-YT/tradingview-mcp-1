@@ -18,6 +18,7 @@ from ..config import Config, SlippageConfig
 from ..data.resample import TF_SECONDS
 from ..db.store import Store
 from ..gate import evaluate
+from ..features.sessions import SESSION_NAMES, session_at
 from ..strategies import scan
 from ..strategies.base import SignalCandidate
 
@@ -39,6 +40,7 @@ class BacktestTrade:
     entry_ref: float
     stop: float
     target: float
+    session: str | None = None
     status: str = "pending"  # pending | open | target | stop | unfilled
     activated_ts: int | None = None
     exit_ts: int | None = None
@@ -59,6 +61,7 @@ class BacktestReport:
     filter_metrics: dict[str, dict[str, int]]
     rejection_reasons: dict[str, int]
     metrics: dict[str, Any]
+    session_filter: str = "all"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +73,7 @@ class BacktestReport:
             "filter_metrics": self.filter_metrics,
             "rejection_reasons": self.rejection_reasons,
             "metrics": self.metrics,
+            "session_filter": self.session_filter,
         }
 
 
@@ -123,6 +127,7 @@ def _new_trade(
         setup=candidate.setup_type,
         direction=candidate.direction,
         grade=candidate.grade,
+        session=candidate.session,
         decision_ts=decision_ts,
         eligible_ts=decision_ts,
         entry_lo=candidate.entry_lo,
@@ -244,6 +249,20 @@ def _metrics(trades: list[BacktestTrade]) -> dict[str, Any]:
             "expectancy_r": (sum(gv) / len(gv)) if gv else None,
             "profit_factor": _profit_factor(gv),
         }
+    by_session: dict[str, dict[str, Any]] = {}
+    for session in SESSION_NAMES:
+        session_trades = [t for t in trades if t.session == session]
+        session_closed = [t for t in session_trades if t.status in ("target", "stop")]
+        sv = [float(t.result_r) for t in session_closed if t.result_r is not None]
+        sw = sum(v > 0 for v in sv)
+        sl = sum(v < 0 for v in sv)
+        by_session[session] = {
+            "accepted": len(session_trades), "closed": len(session_closed),
+            "wins": sw, "losses": sl,
+            "win_rate": sw / (sw + sl) if sw + sl else None,
+            "expectancy_r": sum(sv) / len(sv) if sv else None,
+            "profit_factor": _profit_factor(sv),
+        }
     return {
         "accepted": len(trades),
         "closed": len(closed),
@@ -255,6 +274,7 @@ def _metrics(trades: list[BacktestTrade]) -> dict[str, Any]:
         "unfilled": sum(t.status == "unfilled" for t in trades),
         "open_at_end": sum(t.status == "open" for t in trades),
         "by_grade": by_grade,
+        "by_session": by_session,
     }
 
 
@@ -265,12 +285,15 @@ def run_backtest(
     start_ts: int,
     end_ts: int,
     *,
+    session: str = "all",
     _scanner: Callable[..., Any] = scan,
     _gate: Callable[..., Any] = evaluate,
 ) -> BacktestReport:
     """Replay stored 1m bars over ``[start_ts, end_ts)`` without DB writes."""
     if end_ts <= start_ts:
         raise ValueError("backtest --end must be later than --start")
+    if session not in (*SESSION_NAMES, "all"):
+        raise ValueError(f"unknown session filter {session!r}")
     bars = store.get_candles_df(symbol, "1m", start_ts=start_ts, end_ts=end_ts - 1)
     if bars.empty:
         raise ValueError(f"no stored 1m bars for {symbol} in the requested range")
@@ -290,6 +313,9 @@ def run_backtest(
                 continue
             if _advance_trade(trade, bar, tick_size=tick_size, slippage=slippage):
                 ledger.record_result(trade.symbol, trade.trading_day, float(trade.result_r))
+
+        if session != "all" and session_at(int(bar.ts), config.sessions) != session:
+            continue
 
         # as_of_ts is the 1m bar OPEN; build_market_state derives the close
         # horizon. Both production seams are explicitly non-persistent.
@@ -337,6 +363,7 @@ def run_backtest(
         filter_metrics={k: dict(v) for k, v in sorted(filter_counts.items())},
         rejection_reasons=dict(sorted(reasons.items())),
         metrics=_metrics(trades),
+        session_filter=session,
     )
 
 
@@ -356,6 +383,7 @@ def render_markdown(report: BacktestReport) -> str:
         f"# Golden Hour Backtest — {report.symbol}",
         "",
         f"Range: {start:%Y-%m-%d %H:%M ET} to {end:%Y-%m-%d %H:%M ET} (end exclusive)",
+        f"Entry session filter: {report.session_filter}",
         f"Bars replayed: {report.bars_processed} · accepted: {metrics['accepted']} · closed: {metrics['closed']}",
         "",
         "## Performance Summary",
@@ -376,6 +404,17 @@ def render_markdown(report: BacktestReport) -> str:
             f"| {grade} | {gm['trades']} | {gm['wins']} | {gm['losses']} | "
             f"{_fmt_ratio(gm['win_rate'], pct=True)} | {_fmt_ratio(gm['expectancy_r'])} | "
             f"{_fmt_ratio(gm['profit_factor'])} |"
+        )
+    lines += [
+        "", "## Results by Session", "",
+        "| session | accepted | closed | wins | losses | win rate | expectancy R | profit factor |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for session, sm in metrics["by_session"].items():
+        lines.append(
+            f"| {session} | {sm['accepted']} | {sm['closed']} | {sm['wins']} | {sm['losses']} | "
+            f"{_fmt_ratio(sm['win_rate'], pct=True)} | {_fmt_ratio(sm['expectancy_r'])} | "
+            f"{_fmt_ratio(sm['profit_factor'])} |"
         )
     lines += [
         "",

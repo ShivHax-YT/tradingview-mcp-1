@@ -139,14 +139,15 @@ def desk_mode_status(store: Store, config: Config, state: dict | None) -> dict[s
     symbol = state.get("symbol", "MNQ")
     day = state.get("trading_day")
     horizon = int(state.get("as_of_close_ts") or state.get("ts") or 0)
-    within, gh_detail = golden_hour_status(config, horizon)
+    session = state.get("session")
+    within, gh_detail = golden_hour_status(config, horizon, session)
     clear, gov_detail, counts = trade_governor_status(store, config, symbol, day)
     prep_path = prep_cache_path(config, symbol, day) if day else None
     return {
         "golden_hour": {
             "enforced": config.risk.enforce_golden_hour,
             "within": within,
-            "window": list(config.risk.golden_hour),
+            "window": list(config.risk.golden_hours.get(session, [])),
             "detail": gh_detail,
         },
         "governor": {"clear": clear, "detail": gov_detail, **counts},

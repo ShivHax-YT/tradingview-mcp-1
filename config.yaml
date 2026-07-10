@@ -104,16 +104,25 @@ risk:
   signal_expiry_candles: 3
   max_feed_staleness_s: 180       # closed-candle gate/dashboard share this limit
   reclaim_max_candles: 3            # spec range 3-5; start strict
-  max_stop_atr_mult: 2.0            # stop wider than N*ATR(14) rejects
+  max_stop_atr_mult:
+    default: 2.0
+    asia: 2.0                       # UNCALIBRATED until backtested
+    london: 2.0                     # UNCALIBRATED until backtested
   max_entry_distance_atr_mult: 0.5  # price farther than N*ATR from entry zone = chased
   min_target_atr_mult: 0.5          # target closer than this*ATR = not worth it
-  chop_min_day_range_atr_mult: 2.0  # day span < this*ATR15 = chop, stand down
+  chop_min_day_range_atr_mult:
+    default: 2.0
+    asia: 2.0                       # UNCALIBRATED until backtested
+    london: 2.0                     # UNCALIBRATED until backtested
   allowed_sessions: ["ny"]          # Desk Mode v0.2: NY session only
   min_actionable_grades: ["A", "B"] # C-grade setups are journal-only WAITs
   # ── Desk Mode v0.2 ──
   # Golden hour (America/New_York): start inclusive, end exclusive.
   enforce_golden_hour: true
-  golden_hour: ["09:30", "11:00"]
+  golden_hours:                     # ET, DST-safe; end is exclusive
+    ny: ["09:30", "11:00"]
+    london: ["03:00", "05:30"]
+    asia: ["20:00", "23:00"]
   # Trade governor over JOURNALED trade_reviews of the same trading day:
   # one journaled win = done for the day; N journaled losses = done.
   # Skipped trades and scratch (0R) results count as neither.

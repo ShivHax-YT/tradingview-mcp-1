@@ -228,7 +228,7 @@ def render_weekly_review(
     lines += [
         "",
         f"RULES_ACTIVE: min_rr={r.min_rr}; expiry={r.signal_expiry_candles}x5m; "
-        f"sessions={','.join(r.allowed_sessions)}; golden={r.golden_hour[0]}-{r.golden_hour[1]}; "
+        f"sessions={','.join(r.allowed_sessions)}; golden_windows={r.golden_hours}; "
         f"stop_on_first_win={str(r.stop_on_first_win).lower()}; max_losses={r.stop_after_losses}",
         f"BOUNDARIES: next_roll_window={roll_start.isoformat()}..{roll_end.isoformat()}; "
         f"news_blackouts={blackouts}",

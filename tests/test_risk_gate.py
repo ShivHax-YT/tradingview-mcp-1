@@ -5,6 +5,7 @@ import json
 import pytest
 
 from futures_copilot.gate import evaluate
+from futures_copilot.gate.risk_gate import _session_risk_value
 from futures_copilot.strategies import build_context, scan
 from futures_copilot.strategies.liquidity_trap import SessionLiquidityTrap
 
@@ -56,6 +57,43 @@ def test_c_grade_is_wait_journal_only_while_a_grade_is_unchanged(config, store, 
     out = evaluate(state, [journal_only], store, config, persist=False)
     assert out.decision == "WAIT"
     assert out.evaluations[0].reasons == ["grade below actionable threshold — journal only"]
+
+
+def test_session_data_ready_waits_below_thirty_bars(config, store, scanned, monkeypatch):
+    state, cands = scanned
+    passing = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    monkeypatch.setattr(store, "count_candles", lambda *args, **kwargs: 29)
+    out = evaluate(state, [passing], store, config, persist=False)
+    assert out.decision == "WAIT"
+    assert any(c.check == "session_data_ready" and not c.passed for c in out.evaluations[0].checklist)
+
+
+def test_session_data_ready_accepts_thirty_bars_and_atr(config, store, scanned, monkeypatch):
+    state, cands = scanned
+    passing = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    monkeypatch.setattr(store, "count_candles", lambda *args, **kwargs: 30)
+    assert evaluate(state, [passing], store, config, persist=False).decision == "LONG"
+
+
+def test_session_data_ready_waits_when_atr15_missing(config, store, scanned):
+    state, cands = scanned
+    passing = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    out = evaluate(state.model_copy(update={"atr_15m": None}), [passing], store, config, persist=False)
+    assert out.decision == "WAIT"
+    assert any(c.check == "session_data_ready" and not c.passed for c in out.evaluations[0].checklist)
+
+
+def test_unknown_candidate_session_waits(config, store, scanned):
+    state, cands = scanned
+    passing = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    out = evaluate(state, [passing.model_copy(update={"session": "unknown"})], store, config, persist=False)
+    assert out.decision == "WAIT"
+
+
+def test_session_risk_override_and_default_fallback():
+    limits = {"default": 2.0, "asia": 1.5}
+    assert _session_risk_value(limits, "asia") == 1.5
+    assert _session_risk_value(limits, "ny") == 2.0
 
 
 def test_min_rr_reject(config, store, scanned):

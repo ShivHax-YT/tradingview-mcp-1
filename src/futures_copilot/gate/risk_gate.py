@@ -19,14 +19,14 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from ..config import Config
 from ..db.store import Store
 from ..features.equal_levels import equal_level_near_stop
 from ..features.market_state import MarketState
-from ..features.sessions import trading_day as signal_trading_day
+from ..features.sessions import SESSION_NAMES, session_bounds, trading_day as signal_trading_day
 from ..strategies.base import SignalCandidate
 from ..strategies.liquidity_trap import TF_SECONDS
 from ..utils.roll_dates import is_in_roll_window
@@ -84,16 +84,29 @@ def _hm_minutes(s: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def golden_hour_status(config: Config, horizon_ts: int) -> tuple[bool, str]:
+def golden_hour_status(config: Config, horizon_ts: int, session: str | None = None) -> tuple[bool, str]:
     """(within_window, detail) for the DECISION time (market-state horizon).
     Start inclusive, end exclusive: 09:30 passes, 11:00 rejects. ET wall clock."""
     r = config.risk
-    start_s, end_s = r.golden_hour[0], r.golden_hour[1]
+    window = r.golden_hours.get(session or "")
+    if window is None:
+        return False, f"unknown session {session!r} has no configured golden window — WAIT"
+    start_s, end_s = window
     dt = datetime.fromtimestamp(horizon_ts, tz=ET)
     now_min = dt.hour * 60 + dt.minute
     within = _hm_minutes(start_s) <= now_min < _hm_minutes(end_s)
-    return within, (f"decision time {dt:%H:%M} ET vs golden hour "
+    return within, (f"decision time {dt:%H:%M} ET vs golden hour for {session} "
                     f"[{start_s}, {end_s}) — {'inside' if within else 'outside'}")
+
+
+def _session_risk_value(value: float | dict[str, float], session: str | None) -> float:
+    if not isinstance(value, dict):
+        return float(value)
+    if session in value:
+        return float(value[session])
+    if "default" not in value:
+        raise ValueError("session risk map requires a default fallback")
+    return float(value["default"])
 
 
 def trade_governor_status(store: Store, config: Config, symbol: str,
@@ -240,8 +253,9 @@ def _evaluate_candidate(
     # stop width cap
     if atr:
         stop_dist = abs(cand.entry_ref - cand.stop)
-        check("stop_width_within_atr_cap", stop_dist <= r.max_stop_atr_mult * atr,
-              f"stop distance {stop_dist:.2f} vs cap {r.max_stop_atr_mult * atr:.2f}")
+        stop_mult = _session_risk_value(r.max_stop_atr_mult, cand.session)
+        check("stop_width_within_atr_cap", stop_dist <= stop_mult * atr,
+              f"stop distance {stop_dist:.2f} vs cap {stop_mult * atr:.2f} ({cand.session})")
         # target must be meaningfully away
         tgt_dist = abs(cand.target - cand.entry_ref)
         check("target_not_too_close", tgt_dist >= r.min_target_atr_mult * atr,
@@ -251,15 +265,36 @@ def _evaluate_candidate(
         indeterminate("target_not_too_close", "no ATR available — WAIT; cannot judge target distance")
 
     # session filter
-    check("session_allowed", cand.session in r.allowed_sessions,
-          f"session={cand.session} allowed={r.allowed_sessions}")
+    if cand.session not in SESSION_NAMES:
+        indeterminate("session_allowed", f"unknown session={cand.session} — WAIT")
+    else:
+        check("session_allowed", cand.session in r.allowed_sessions,
+              f"session={cand.session} allowed={r.allowed_sessions}")
+
+    if cand.session in SESSION_NAMES:
+        start, end = session_bounds(date.fromisoformat(state.trading_day), cand.session, config.sessions)
+        session_bars = store.count_candles(
+            cand.symbol, "1m", start_ts=start, end_ts=min(end, horizon),
+        )
+        if session_bars >= 30 and state.atr_15m is not None:
+            check("session_data_ready", True, f"{session_bars} stored 1m bars and ATR15 available")
+        else:
+            indeterminate(
+                "session_data_ready",
+                f"{session_bars} stored 1m bars; ATR15={'available' if state.atr_15m is not None else 'missing'} — WAIT",
+            )
+    else:
+        indeterminate("session_data_ready", "unknown session — WAIT")
 
     # golden hour (Desk Mode): actionable only inside the ET window, judged at
     # the market-state horizon (as_of_close_ts) — same no-lookahead clock as
     # every other check. 09:30 inclusive, 11:00 exclusive.
     if r.enforce_golden_hour:
-        within, gh_detail = golden_hour_status(config, horizon)
-        check("golden_hour_allowed", within, gh_detail)
+        within, gh_detail = golden_hour_status(config, horizon, cand.session)
+        if cand.session not in r.golden_hours:
+            indeterminate("golden_hour_allowed", gh_detail)
+        else:
+            check("golden_hour_allowed", within, gh_detail)
     else:
         check("golden_hour_allowed", True, "golden hour not enforced")
 
@@ -300,9 +335,10 @@ def _evaluate_candidate(
         if his and los:
             day_span = max(his) - min(los)
     if day_span is not None and state.atr_15m:
-        min_span = r.chop_min_day_range_atr_mult * state.atr_15m
+        chop_mult = _session_risk_value(r.chop_min_day_range_atr_mult, cand.session)
+        min_span = chop_mult * state.atr_15m
         check("not_chop", day_span >= min_span,
-              f"day span {day_span:.2f} vs min {min_span:.2f} ({r.chop_min_day_range_atr_mult}x ATR15)")
+              f"day span {day_span:.2f} vs min {min_span:.2f} ({chop_mult}x ATR15, {cand.session})")
     else:
         indeterminate("not_chop", "missing day range or ATR15 — WAIT; cannot judge chop")
 

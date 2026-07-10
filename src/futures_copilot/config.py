@@ -109,10 +109,14 @@ class RiskConfig(BaseModel):
     signal_expiry_candles: int = 3
     max_feed_staleness_s: int = Field(default=180, gt=0)
     reclaim_max_candles: int = 3
-    max_stop_atr_mult: float = 2.0
+    max_stop_atr_mult: float | dict[str, float] = Field(default_factory=lambda: {
+        "default": 2.0, "asia": 2.0, "london": 2.0,
+    })
     max_entry_distance_atr_mult: float = 0.5
     min_target_atr_mult: float = 0.5          # target closer than this*ATR rejects
-    chop_min_day_range_atr_mult: float = 2.0  # day span below this*ATR15 = chop
+    chop_min_day_range_atr_mult: float | dict[str, float] = Field(default_factory=lambda: {
+        "default": 2.0, "asia": 2.0, "london": 2.0,
+    })
     allowed_sessions: list[str] = Field(default_factory=lambda: ["ny"])  # Desk Mode: NY only
     min_actionable_grades: list[str] = Field(default_factory=lambda: ["A", "B"])
 
@@ -129,7 +133,11 @@ class RiskConfig(BaseModel):
     # Golden hour: actionable candidates only inside this ET window.
     # Start is inclusive, end is exclusive (09:30 passes, 11:00 rejects).
     enforce_golden_hour: bool = True
-    golden_hour: list[str] = Field(default_factory=lambda: ["09:30", "11:00"])
+    golden_hours: dict[str, list[str]] = Field(default_factory=lambda: {
+        "ny": ["09:30", "11:00"],
+        "london": ["03:00", "05:30"],
+        "asia": ["20:00", "23:00"],
+    })
     # Trade governor over JOURNALED results (trade_reviews joined to signals of
     # the same trading day). Skipped trades and scratch/zero results count as
     # neither win nor loss.
@@ -141,15 +149,16 @@ class RiskConfig(BaseModel):
     equal_level_tolerance_ticks: int = 3
     equal_level_lookback_bars: int = 50
 
-    @field_validator("golden_hour")
+    @field_validator("golden_hours")
     @classmethod
-    def _golden_hour_shape(cls, v: list[str]) -> list[str]:
-        if len(v) != 2:
-            raise ValueError('golden_hour must be ["HH:MM", "HH:MM"]')
-        for s in v:
-            h, _, m = s.partition(":")
-            if not (h.isdigit() and m.isdigit() and 0 <= int(h) < 24 and 0 <= int(m) < 60):
-                raise ValueError(f"golden_hour entry {s!r} is not HH:MM")
+    def _golden_hours_shape(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        for session, window in v.items():
+            if len(window) != 2:
+                raise ValueError(f'{session} golden_hours entry must be ["HH:MM", "HH:MM"]')
+            for s in window:
+                h, _, m = s.partition(":")
+                if not (h.isdigit() and m.isdigit() and 0 <= int(h) < 24 and 0 <= int(m) < 60):
+                    raise ValueError(f"golden_hours entry {s!r} is not HH:MM")
         return v
 
     @field_validator("auto_execution_enabled")

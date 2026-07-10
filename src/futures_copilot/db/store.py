@@ -136,6 +136,16 @@ class Store:
         ).fetchone()
         return row[0]
 
+    def count_candles(
+        self, symbol: str, timeframe: str, *, start_ts: int, end_ts: int,
+    ) -> int:
+        """Read-only count over ``[start_ts, end_ts)``; safe for query-only stores."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM candles WHERE symbol=? AND timeframe=? AND ts>=? AND ts<?",
+            (symbol, timeframe, start_ts, end_ts),
+        ).fetchone()
+        return int(row[0])
+
     def coverage(self) -> list[dict]:
         """Per (symbol, timeframe): bar count, first/last bar time (ISO UTC)."""
         rows = self.conn.execute(

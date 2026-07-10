@@ -57,6 +57,16 @@
       "phase": 3,
       "notes": "sweep->reclaim->MSS/CISD->FVG entry->next-liquidity target"
     },
+    "strategy.confluence_v2": {
+      "status": "done",
+      "phase": 10,
+      "notes": "collapsed structure scoring, grade actionability, FVG size, iterated sweeps, broader liquidity levels"
+    },
+    "sessions.multi_window": {
+      "status": "done",
+      "phase": 10,
+      "notes": "DST-safe Asia/London/NY windows, coverage gate, per-session risk, filtered backtests"
+    },
     "strategy.orb_skeleton": {
       "status": "done",
       "phase": 3,

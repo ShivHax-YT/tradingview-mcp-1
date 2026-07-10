@@ -248,7 +248,9 @@ def cmd_backtest(config: Config, args) -> int:
 
     start_ts, end_ts = parse_cli_range(args.start, args.end)
     with Store(config.db_file, read_only=True) as store:
-        report = run_backtest(store, config, args.symbol, start_ts, end_ts)
+        report = run_backtest(
+            store, config, args.symbol, start_ts, end_ts, session=args.session,
+        )
     print(render_markdown(report))
     return 0
 
@@ -396,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="ET start boundary: YYYY-MM-DD or ISO datetime (inclusive)")
     p.add_argument("--end", required=True,
                    help="ET end boundary: YYYY-MM-DD includes the full day; datetime is exclusive")
+    p.add_argument("--session", choices=["asia", "london", "ny", "all"], default="all",
+                   help="only create replay entries in this ET session (default: all)")
 
     review_help = (
         "deterministic journal performance synthesis; requires an existing DB "

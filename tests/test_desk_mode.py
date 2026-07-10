@@ -9,7 +9,7 @@ import pytest
 
 from futures_copilot.config import RiskConfig
 from futures_copilot.features.equal_levels import equal_level_near_stop
-from futures_copilot.gate import evaluate
+from futures_copilot.gate import evaluate, golden_hour_status
 from futures_copilot.packet import packet_from_latest, render_markdown
 from futures_copilot.prep import (
     VAULT_ALLOWLIST, build_session_prep, load_session_prep, write_session_prep,
@@ -47,7 +47,10 @@ def _item(gate_decision, name):
 def test_desk_mode_config_defaults():
     r = RiskConfig()
     assert r.enforce_golden_hour is True
-    assert r.golden_hour == ["09:30", "11:00"]
+    assert r.golden_hours == {
+        "ny": ["09:30", "11:00"], "london": ["03:00", "05:30"],
+        "asia": ["20:00", "23:00"],
+    }
     assert r.stop_on_first_win is True
     assert r.stop_after_losses == 2
     assert r.reject_equal_level_stop_magnets is True
@@ -59,7 +62,7 @@ def test_desk_mode_config_defaults():
 def test_desk_mode_config_loaded_from_yaml(config):
     r = config.risk
     assert r.enforce_golden_hour is True
-    assert r.golden_hour == ["09:30", "11:00"]
+    assert r.golden_hours["ny"] == ["09:30", "11:00"]
     assert r.stop_on_first_win is True and r.stop_after_losses == 2
     assert r.reject_equal_level_stop_magnets is True
     assert r.allowed_sessions == ["ny"]
@@ -68,9 +71,19 @@ def test_desk_mode_config_loaded_from_yaml(config):
 
 def test_golden_hour_config_validation():
     with pytest.raises(Exception):
-        RiskConfig(golden_hour=["9am", "11am"])
+        RiskConfig(golden_hours={"ny": ["9am", "11am"]})
     with pytest.raises(Exception):
-        RiskConfig(golden_hour=["09:30"])
+        RiskConfig(golden_hours={"ny": ["09:30"]})
+
+
+@pytest.mark.parametrize("session,h,m,expected", [
+    ("asia", 20, 0, True), ("asia", 23, 0, False),
+    ("london", 3, 0, True), ("london", 5, 30, False),
+    ("ny", 9, 30, True), ("ny", 11, 0, False),
+])
+def test_session_scoped_golden_windows(config, session, h, m, expected):
+    within, _ = golden_hour_status(config, et_ts(2026, 6, 24, h, m), session)
+    assert within is expected
 
 
 # ── golden hour ──────────────────────────────────────────────────────────────
