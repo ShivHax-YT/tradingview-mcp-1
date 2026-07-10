@@ -11,10 +11,12 @@ symbols:
     chart_symbol: "CME_MINI:MNQ1!"   # symbol sent to TradingView Desktop
     tick_size: 0.25
     tick_value: 0.50                 # USD per tick per contract
+    fvg_min_ticks: 4                 # strategy entry gaps smaller than this are ignored
   MES:
     chart_symbol: "CME_MINI:MES1!"
     tick_size: 0.25
     tick_value: 1.25
+    fvg_min_ticks: 4
 
 # Canonical timeframes used across the app. TradingView resolution strings mapped explicitly.
 # NOTE: 4h removed from canonical — it is not backfilled and not derivable from ~8h of
@@ -60,7 +62,7 @@ sessions:
 
 features:
   # Feature-engine parameters (used by `copilot state` and the strategy phases).
-  swing_k: 2                 # fractal half-width; a swing is confirmed k bars later
+  swing_k: 3                 # wider fractal rejects two-bar noise pivots from MSS
   atr_period: 14             # Wilder ATR period
   fvg_lookback_bars: 200     # how many recent 5m bars to scan for FVGs in market state
   max_fvgs_in_state: 5       # cap on open/mitigated FVGs reported in market state
@@ -107,6 +109,7 @@ risk:
   min_target_atr_mult: 0.5          # target closer than this*ATR = not worth it
   chop_min_day_range_atr_mult: 2.0  # day span < this*ATR15 = chop, stand down
   allowed_sessions: ["ny"]          # Desk Mode v0.2: NY session only
+  min_actionable_grades: ["A", "B"] # C-grade setups are journal-only WAITs
   # ── Desk Mode v0.2 ──
   # Golden hour (America/New_York): start inclusive, end exclusive.
   enforce_golden_hour: true

@@ -66,6 +66,18 @@ def test_min_size_filter():
     assert fvgs == []  # gap is exactly 1.0 point
 
 
+def test_four_tick_strategy_threshold_filters_one_tick_but_keeps_six_ticks():
+    tiny = minute_bars(T0, [
+        (99, 100, 98, 99), (99, 104, 99, 103), (103, 105, 100.25, 104),
+    ])
+    large = minute_bars(T0, [
+        (99, 100, 98, 99), (99, 104, 99, 103), (103, 105, 101.5, 104),
+    ])
+    min_size = 4 * 0.25
+    assert detect_fvgs(tiny, tf_seconds=60, min_size=min_size) == []
+    assert len(detect_fvgs(large, tf_seconds=60, min_size=min_size)) == 1
+
+
 def test_no_fvg_in_overlapping_bars():
     df = minute_bars(T0, [(100, 102, 99, 101)] * 5)
     assert detect_fvgs(df, tf_seconds=60) == []

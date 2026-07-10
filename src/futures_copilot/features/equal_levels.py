@@ -32,6 +32,35 @@ class EqualLevelHit:
                 f"within tolerance of the stop")
 
 
+def equal_level_clusters(
+    df: pd.DataFrame,
+    *,
+    tolerance: float,
+    lookback_bars: int,
+    horizon_ts: int,
+    tf_seconds: int,
+) -> list[EqualLevelHit]:
+    """Enumerate confirmed equal-high/low clusters without lookahead.
+
+    Cluster prices use the resting-liquidity extreme (minimum low / maximum
+    high), while ``bar_ts`` preserves when the contributing bars were known.
+    """
+    if df is None or df.empty or tolerance < 0 or lookback_bars <= 0:
+        return []
+    recent = df[df["ts"] + tf_seconds <= horizon_ts].tail(lookback_bars)
+    out: list[EqualLevelHit] = []
+    for col, side in (("low", "lows"), ("high", "highs")):
+        remaining = [(int(t), float(v)) for t, v in zip(recent["ts"], recent[col])]
+        while remaining:
+            anchor = remaining[0][1]
+            matched = [(t, v) for t, v in remaining if abs(v - anchor) <= tolerance + 1e-9]
+            remaining = [(t, v) for t, v in remaining if (t, v) not in matched]
+            if len(matched) >= 2:
+                price = min(v for _, v in matched) if side == "lows" else max(v for _, v in matched)
+                out.append(EqualLevelHit(side, price, len(matched), tuple(t for t, _ in matched)))
+    return out
+
+
 def equal_level_near_stop(
     df: pd.DataFrame,
     *,

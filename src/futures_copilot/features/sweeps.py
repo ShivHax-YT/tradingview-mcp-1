@@ -38,21 +38,33 @@ class Reclaim:
 
 def detect_sweep(
     df: pd.DataFrame, level: float, side: str, level_name: str = "", start_ts: int | None = None
-) -> Sweep | None:
-    """First bar (at/after start_ts) that trades through `level` on `side`."""
+) -> list[Sweep]:
+    """All distinct pierces after ``start_ts``.
+
+    A detector rearms only after a later close returns to the original side;
+    this avoids inventing intrabar ordering on a pierce-and-reclaim candle.
+    """
     if side not in SIDES:
         raise ValueError(f"side must be one of {SIDES}")
     ts = df["ts"].to_numpy()
     lows = df["low"].to_numpy()
     highs = df["high"].to_numpy()
+    closes = df["close"].to_numpy()
+    out: list[Sweep] = []
+    armed = True
     for i in range(len(df)):
         if start_ts is not None and ts[i] < start_ts:
             continue
-        if side == "sell" and lows[i] < level:
-            return Sweep("sell", level, level_name, int(ts[i]), i, float(lows[i]))
-        if side == "buy" and highs[i] > level:
-            return Sweep("buy", level, level_name, int(ts[i]), i, float(highs[i]))
-    return None
+        pierced = (side == "sell" and lows[i] < level) or (side == "buy" and highs[i] > level)
+        if armed and pierced:
+            extreme = lows[i] if side == "sell" else highs[i]
+            out.append(Sweep(side, level, level_name, int(ts[i]), i, float(extreme)))
+            armed = False
+            continue
+        reclaimed = (side == "sell" and closes[i] > level) or (side == "buy" and closes[i] < level)
+        if not armed and reclaimed:
+            armed = True
+    return out
 
 
 def detect_reclaim(df: pd.DataFrame, sweep: Sweep, max_candles: int) -> Reclaim | None:

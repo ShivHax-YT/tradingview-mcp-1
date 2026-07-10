@@ -23,11 +23,12 @@ from typing import Any
 import pandas as pd
 
 from ..features.fvg import detect_fvgs
+from ..features.equal_levels import equal_level_clusters
 from ..features.pricing import premium_discount, rr as rr_of
 from ..features.sessions import session_bounds
 from ..features.structure import detect_cisd, detect_mss
 from ..features.sweeps import detect_reclaim, detect_sweep
-from ..features.swings import find_swings
+from ..features.swings import find_swings, swings_confirmed_by
 from ..features.volatility import atr
 from .base import SignalCandidate, Strategy, StrategyContext
 
@@ -50,7 +51,48 @@ def _watch_levels(ctx: StrategyContext) -> list[dict[str, Any]]:
         if lp is not None:
             out.append({"name": f"{name}_low", "price": lp.low, "side": "sell"})
             out.append({"name": f"{name}_high", "price": lp.high, "side": "buy"})
-    return out
+    if st.opening_range is not None:
+        out.append({"name": "opening_range_low", "price": st.opening_range.low, "side": "sell"})
+        out.append({"name": "opening_range_high", "price": st.opening_range.high, "side": "buy"})
+
+    tolerance = ctx.config.risk.equal_level_tolerance_ticks * ctx.spec.tick_size
+    det_tf = ctx.config.strategies.detection_timeframe
+    det_s = TF_SECONDS[det_tf]
+    for idx, cluster in enumerate(equal_level_clusters(
+        ctx.dfs.get(det_tf), tolerance=tolerance,
+        lookback_bars=ctx.config.risk.equal_level_lookback_bars,
+        horizon_ts=ctx.horizon_ts, tf_seconds=det_s,
+    )):
+        side = "sell" if cluster.side == "lows" else "buy"
+        out.append({
+            "name": f"equal_{'low' if side == 'sell' else 'high'}_{idx + 1}",
+            "price": cluster.price, "side": side,
+            "_known_ts": max(cluster.bar_ts) + det_s,
+        })
+
+    df15 = ctx.dfs.get("15m")
+    if df15 is not None and not df15.empty:
+        confirmed = swings_confirmed_by(
+            find_swings(df15, ctx.config.features.swing_k, TF_SECONDS["15m"]),
+            ctx.horizon_ts,
+        )
+        for kind, side in (("low", "sell"), ("high", "buy")):
+            for idx, swing in enumerate(reversed([s for s in confirmed if s.kind == kind][-2:]), 1):
+                out.append({
+                    "name": f"swing_15m_{kind}_{idx}", "price": swing.price,
+                    "side": side, "_known_ts": swing.confirmed_close_ts,
+                })
+
+    deduped: list[dict[str, Any]] = []
+    for level in out:
+        if any(
+            existing["side"] == level["side"]
+            and abs(float(existing["price"]) - float(level["price"])) <= tolerance + 1e-9
+            for existing in deduped
+        ):
+            continue
+        deduped.append(level)
+    return deduped
 
 
 def _target_levels(ctx: StrategyContext, direction: str) -> list[tuple[str, float]]:
@@ -60,10 +102,27 @@ def _target_levels(ctx: StrategyContext, direction: str) -> list[tuple[str, floa
     entry filter at the call site enforces that). Opening-range edges are NOT
     trap targets — they belong to the ORB playbook."""
     want = "buy" if direction == "long" else "sell"
-    out = [(lv["name"], float(lv["price"])) for lv in _watch_levels(ctx) if lv["side"] == want]
-    if ctx.state.vwap is not None:
-        out.append(("vwap", float(ctx.state.vwap)))
+    out = [
+        (lv["name"], float(lv["price"])) for lv in _watch_levels(ctx)
+        if lv["side"] == want and not lv["name"].startswith("opening_range_")
+    ]
     return out
+
+
+def _grade_confluences(confluences: list[str], *, countertrend: bool) -> tuple[int, str]:
+    """Score MSS+CISD once and require independent evidence for grade A."""
+    structural = {"mss_confirmed", "cisd_confirmed"}
+    score = sum(tag not in structural for tag in confluences)
+    if structural.intersection(confluences):
+        score += 1
+    if countertrend:
+        score = max(0, score - 1)
+    independent = any(
+        tag in {"discount_context", "premium_context", "htf_fvg", "smt_divergence"}
+        for tag in confluences
+    )
+    grade = "A" if score >= 5 and independent else ("B" if score >= 4 else "C")
+    return score, grade
 
 
 class SessionLiquidityTrap(Strategy):
@@ -114,10 +173,29 @@ class SessionLiquidityTrap(Strategy):
         side = lv["side"]                       # 'sell' sweep -> long trap
         direction = "long" if side == "sell" else "short"
 
-        # 1. sweep within the current session
-        sweep = detect_sweep(df, level, side, lv["name"], start_ts=sess_start)
-        if sweep is None:
-            return None
+        # 1. most recent eligible sweep, never before a derived level was knowable.
+        start_ts = max(sess_start, int(lv.get("_known_ts", sess_start)))
+        sweeps = detect_sweep(df, level, side, lv["name"], start_ts=start_ts)
+        for sweep in reversed(sweeps):
+            if ctx.horizon_ts > sweep.ts + (scfg.confirm_max_candles + 1) * tf_s:
+                continue
+            candidate = self._candidate_for_sweep(
+                ctx, df, lv, sweep, tf, tf_s, cur_atr, swings,
+            )
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _candidate_for_sweep(
+        self, ctx: StrategyContext, df: pd.DataFrame, lv: dict[str, Any], sweep,
+        tf: str, tf_s: int, cur_atr: float, swings,
+    ) -> SignalCandidate | None:
+        scfg = ctx.config.strategies
+        rcfg = ctx.config.risk
+        st = ctx.state
+        level = float(lv["price"])
+        side = lv["side"]
+        direction = "long" if side == "sell" else "short"
 
         # 2. reclaim within config candles
         reclaim = detect_reclaim(df, sweep, rcfg.reclaim_max_candles)
@@ -143,7 +221,8 @@ class SessionLiquidityTrap(Strategy):
         entry_lo = entry_hi = entry_ref = None
         entry_kind = "structure_retest"
         impulse = df[(df["ts"] >= sweep.ts)].reset_index(drop=True)
-        for g in detect_fvgs(impulse, tf_s):
+        min_fvg_size = ctx.spec.fvg_min_ticks * ctx.spec.tick_size
+        for g in detect_fvgs(impulse, tf_s, min_size=min_fvg_size):
             wanted = "bullish" if direction == "long" else "bearish"
             if g.kind != wanted or g.created_close_ts > ctx.horizon_ts:
                 continue
@@ -210,27 +289,32 @@ class SessionLiquidityTrap(Strategy):
             confluences.append("ifvg_inversion")
 
         pd_ctx = st.premium_discount_day
+        pd_opposed = False
         if pd_ctx is not None:
             favorable = (direction == "long" and pd_ctx == "discount") or (
                 direction == "short" and pd_ctx == "premium") or pd_ctx == "equilibrium"
             if favorable:
                 confluences.append(f"{pd_ctx}_context")
             else:
+                pd_opposed = True
                 warnings.append(f"countertrend_range_position:{pd_ctx}")
 
+        vwap_opposed = False
         if st.vwap is not None:
             fav_vwap = (direction == "long" and st.vwap_position == "above") or (
                 direction == "short" and st.vwap_position == "below")
             if fav_vwap:
                 confluences.append("vwap_favorable")
             else:
+                vwap_opposed = True
                 warnings.append(f"vwap_against:{st.vwap_position}")
 
         if rr >= scfg.min_target_rr_for_grade_a:
             confluences.append("rr_2_plus")
 
-        score = len(confluences)
-        grade = "A" if score >= 6 else ("B" if score >= 4 else "C")
+        score, grade = _grade_confluences(
+            confluences, countertrend=pd_opposed and vwap_opposed,
+        )
 
         return SignalCandidate(
             strategy=self.name,
@@ -264,5 +348,6 @@ class SessionLiquidityTrap(Strategy):
                 "atr": cur_atr,
                 "premium_discount_day": st.premium_discount_day,
                 "vwap": st.vwap, "vwap_position": st.vwap_position,
+                "confluence_score": score,
             },
         )

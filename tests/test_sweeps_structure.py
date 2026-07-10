@@ -19,7 +19,7 @@ def test_sell_side_sweep_and_reclaim():
             (99.8, 100.9, 99.6, 100.6),     # closes back above -> reclaim (2 candles)
         ],
     )
-    sweep = detect_sweep(df, LEVEL, side="sell", level_name="asia_low")
+    sweep = detect_sweep(df, LEVEL, side="sell", level_name="asia_low")[0]
     assert sweep is not None and sweep.idx == 1 and sweep.extreme == 99.5
 
     reclaim = detect_reclaim(df, sweep, max_candles=3)
@@ -37,13 +37,13 @@ def test_reclaim_window_too_short_returns_none():
             (99.8, 100.9, 99.6, 100.6),
         ],
     )
-    sweep = detect_sweep(df, LEVEL, side="sell")
+    sweep = detect_sweep(df, LEVEL, side="sell")[0]
     assert detect_reclaim(df, sweep, max_candles=1) is None
 
 
 def test_wick_through_reclaims_same_bar():
     df = minute_bars(T0, [(101.0, 101.5, 99.5, 100.4)])  # stop-run candle
-    sweep = detect_sweep(df, LEVEL, side="sell")
+    sweep = detect_sweep(df, LEVEL, side="sell")[0]
     reclaim = detect_reclaim(df, sweep, max_candles=3)
     assert reclaim is not None and reclaim.candles_after_sweep == 1
 
@@ -57,7 +57,7 @@ def test_buy_side_sweep_and_bearish_reclaim():
             (109.2, 111.0, 109.0, 109.4),   # wick above 110, close back below -> sweep+reclaim
         ],
     )
-    sweep = detect_sweep(df, level, side="buy", level_name="pdh")
+    sweep = detect_sweep(df, level, side="buy", level_name="pdh")[0]
     assert sweep is not None and sweep.extreme == 111.0
     reclaim = detect_reclaim(df, sweep, max_candles=3)
     assert reclaim is not None and reclaim.candles_after_sweep == 1
@@ -65,13 +65,34 @@ def test_buy_side_sweep_and_bearish_reclaim():
 
 def test_no_sweep_when_level_holds():
     df = minute_bars(T0, [(101, 102, 100.5, 101.5)] * 5)
-    assert detect_sweep(df, LEVEL, side="sell") is None
+    assert detect_sweep(df, LEVEL, side="sell") == []
 
 
 def test_invalid_side_raises():
     df = minute_bars(T0, [(101, 102, 100.5, 101.5)])
     with pytest.raises(ValueError):
         detect_sweep(df, LEVEL, side="up")
+
+
+def test_detect_sweep_returns_distinct_rearmed_pierces():
+    df = minute_bars(T0, [
+        (101, 102, 99, 99.5),
+        (99.5, 100, 98.5, 99.8),
+        (99.8, 101, 99.7, 100.5),  # closes back above and rearms
+        (100.5, 101, 99.2, 100.4),
+    ])
+    sweeps = detect_sweep(df, LEVEL, side="sell")
+    assert [s.idx for s in sweeps] == [0, 3]
+
+
+def test_swing_k_three_ignores_two_bar_noise_pivot():
+    df = minute_bars(T0, [
+        (100, 100.0, 99, 100), (100, 100.25, 99, 100),
+        (100, 100.5, 99, 100), (100, 100.25, 99, 100),
+        (100, 100.0, 99, 100), (100, 101.0, 99, 100),
+        (100, 100.5, 99, 100),
+    ])
+    assert not [s for s in find_swings(df, k=3, tf_seconds=60) if s.kind == "high" and s.price == 100.5]
 
 
 # ── MSS ─────────────────────────────────────────────────────────────────────

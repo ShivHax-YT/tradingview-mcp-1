@@ -213,6 +213,15 @@ def _evaluate_candidate(
     # minimum reward:risk
     check("min_rr", cand.rr >= r.min_rr, f"rr={cand.rr:.2f} min={r.min_rr}")
 
+    grade_ok = cand.grade in r.min_actionable_grades
+    if grade_ok:
+        check("grade_actionable", True, f"grade={cand.grade} actionable={r.min_actionable_grades}")
+    else:
+        indeterminate(
+            "grade_actionable",
+            "grade below actionable threshold — journal only",
+        )
+
     # freshness: signal expires after N detection-TF candles
     bars_elapsed = max(0, (horizon - cand.confirmed_close_ts) // tf_s)
     check("not_stale", bars_elapsed <= r.signal_expiry_candles,
@@ -316,7 +325,10 @@ def _evaluate_candidate(
           f"{day_count} passing signals already today (max {r.max_signals_per_day})")
 
     failed = [c for c in checks if not c.passed]
-    reasons = [f"{c.check}: {c.detail}" for c in failed]
+    reasons = [
+        c.detail if c.check == "grade_actionable" else f"{c.check}: {c.detail}"
+        for c in failed
+    ]
     warnings = list(cand.warnings)
 
     if cand.direction == "long":

@@ -14,6 +14,7 @@ class SymbolSpec(BaseModel):
     chart_symbol: str
     tick_size: float
     tick_value: float
+    fvg_min_ticks: int = Field(default=4, ge=1)
 
 
 class TimeframesConfig(BaseModel):
@@ -67,7 +68,8 @@ class SessionsConfig(BaseModel):
 
 
 class FeaturesConfig(BaseModel):
-    swing_k: int = 2                 # fractal half-width; swing confirmed k bars later
+    # k=3 deliberately rejects narrow two-bar noise pivots from MSS reference use.
+    swing_k: int = 3                 # fractal half-width; swing confirmed k bars later
     atr_period: int = 14
     fvg_lookback_bars: int = 200     # how far back to scan 5m FVGs for market state
     max_fvgs_in_state: int = 5
@@ -112,6 +114,15 @@ class RiskConfig(BaseModel):
     min_target_atr_mult: float = 0.5          # target closer than this*ATR rejects
     chop_min_day_range_atr_mult: float = 2.0  # day span below this*ATR15 = chop
     allowed_sessions: list[str] = Field(default_factory=lambda: ["ny"])  # Desk Mode: NY only
+    min_actionable_grades: list[str] = Field(default_factory=lambda: ["A", "B"])
+
+    @field_validator("min_actionable_grades")
+    @classmethod
+    def _valid_actionable_grades(cls, v: list[str]) -> list[str]:
+        invalid = [grade for grade in v if grade not in {"A", "B", "C"}]
+        if invalid or not v:
+            raise ValueError("min_actionable_grades must be a non-empty subset of A, B, C")
+        return list(dict.fromkeys(v))
     news_blackouts: list[NewsBlackout] = Field(default_factory=list)
 
     # ── Desk Mode v0.2 ───────────────────────────────────────────────────────

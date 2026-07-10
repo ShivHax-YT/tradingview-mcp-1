@@ -47,6 +47,17 @@ def test_wait_when_no_candidates(config, store, scanned):
     assert out.chosen is None and out.evaluations == []
 
 
+def test_c_grade_is_wait_journal_only_while_a_grade_is_unchanged(config, store, scanned):
+    state, cands = scanned
+    passing = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    assert passing.grade == "A"
+    assert evaluate(state, [passing], store, config, persist=False).decision == "LONG"
+    journal_only = passing.model_copy(update={"grade": "C"})
+    out = evaluate(state, [journal_only], store, config, persist=False)
+    assert out.decision == "WAIT"
+    assert out.evaluations[0].reasons == ["grade below actionable threshold — journal only"]
+
+
 def test_min_rr_reject(config, store, scanned):
     state, cands = scanned
     bad = _asia(cands).model_copy(update={"rr": 1.2})
