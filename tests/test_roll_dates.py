@@ -133,6 +133,24 @@ def test_risk_gate_rejects_roll_window_signal(config, store):
     assert [check.check for check in gd.checklist] == ["roll_window_clear"]
 
 
+def test_stale_feed_forces_wait_even_during_roll_window(config, store):
+    ts = et_ts(2026, 6, 15, 10, 0)
+    state = _state(ts)
+
+    out = evaluate(
+        state,
+        [_candidate(ts)],
+        store,
+        config,
+        persist=False,
+        now_ts=state.as_of_close_ts + config.risk.max_feed_staleness_s + 1,
+    )
+
+    assert out.decision == "WAIT"
+    assert out.evaluations[0].reasons == ["stale feed"]
+    assert [check.check for check in out.evaluations[0].checklist] == ["feed_fresh"]
+
+
 def test_risk_gate_uses_candidate_trading_day_after_18et(config, store):
     # Thu 20:05 ET belongs to Fri 06-12, the first day of the 06-15 roll
     # window. Raw calendar anchoring would incorrectly use Thu 06-11.

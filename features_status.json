@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-07-02",
+  "updated": "2026-07-10",
   "features": {
     "data.tvmcp_bridge": {
       "status": "done",
@@ -96,6 +96,21 @@
       "status": "done",
       "phase": 8,
       "notes": "Legend-style dark UI; AppTest-verified; read+journal only"
+    },
+    "dashboard.mcp_resource": {
+      "status": "done",
+      "phase": 8,
+      "notes": "session-scoped serialized MCP source; health validation; reconnect-on-drop; deterministic close"
+    },
+    "backtest.engine": {
+      "status": "done",
+      "phase": 9,
+      "notes": "read-only deterministic Golden Hour replay; gap-aware fills and conservative symbol slippage"
+    },
+    "review.weekly": {
+      "status": "done",
+      "phase": 9,
+      "notes": "read-only SQLite seven-session synthesis; normalized ISO-week vault output; preserves manual narrative"
     },
     "adapters.paid_data": {
       "status": "excluded",

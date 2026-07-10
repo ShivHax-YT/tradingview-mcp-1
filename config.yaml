@@ -38,6 +38,7 @@ data:
     cdp_port: 9222
     request_timeout_s: 30
     max_bars_per_call: 500          # hard limit of data_get_ohlcv
+    max_live_data_latency_s: 5      # fail closed after the active bar is >5s overdue
   backfill:
     # data_get_ohlcv returns the NEWEST <=500 bars for the chart's active timeframe.
     # Deep 1m history is unreachable, so backfill pulls each timeframe natively.
@@ -99,6 +100,7 @@ risk:
   max_signals_per_session: 2
   max_signals_per_day: 3
   signal_expiry_candles: 3
+  max_feed_staleness_s: 180       # closed-candle gate/dashboard share this limit
   reclaim_max_candles: 3            # spec range 3-5; start strict
   max_stop_atr_mult: 2.0            # stop wider than N*ATR(14) rejects
   max_entry_distance_atr_mult: 0.5  # price farther than N*ATR from entry zone = chased
@@ -140,7 +142,7 @@ vault:
   # Obsidian vault used ONLY by `copilot prep` (session-prep cache written to
   # data/session_prep/). The live scan/risk gate/dashboard refresh NEVER read
   # the vault — Python/risk gate first, Claude/Obsidian later.
-  path: "C:/Users/ShivHax/Documents/Trading Brain/Trading Brain"
+  path: "C:/Users/ShivHax/Documents/Trading Brain"
   session_prep_dir: data/session_prep
   max_chars_per_note: 4000
 
@@ -148,4 +150,4 @@ backtest:
   # Conservative, symbol-specific adverse fill assumptions (ticks).
   slippage:
     MNQ: {entry_ticks: 1, stop_ticks: 2, target_ticks: 1}
-    MES: {entry_ticks: 1, stop_ticks: 1, target_ticks: 1}
+    MES: {entry_ticks: 1, stop_ticks: 2, target_ticks: 1}

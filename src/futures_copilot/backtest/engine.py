@@ -163,16 +163,16 @@ def _advance_trade(
         activated_now = True
         trade.activated_ts = bar_ts
         if trade.direction == "long":
-            touched_edge = min(trade.entry_hi, float(bar.high))
-            trade.fill_price = min(
-                touched_edge + slippage.entry_ticks * tick_size,
-                float(bar.high),
+            trade.fill_price = (
+                trade.entry_hi + slippage.entry_ticks * tick_size
+                if float(bar.high) >= trade.entry_hi
+                else float(bar.high)
             )
         else:
-            touched_edge = max(trade.entry_lo, float(bar.low))
-            trade.fill_price = max(
-                touched_edge - slippage.entry_ticks * tick_size,
-                float(bar.low),
+            trade.fill_price = (
+                trade.entry_lo - slippage.entry_ticks * tick_size
+                if float(bar.low) <= trade.entry_lo
+                else float(bar.low)
             )
 
     if trade.status != "open":
@@ -196,16 +196,22 @@ def _advance_trade(
     trade.status = "stop" if stopped else "target"
     trade.exit_ts = bar_ts
     if trade.direction == "long":
-        trade.exit_price = (
-            trade.stop - slippage.stop_ticks * tick_size if stopped
-            else trade.target - slippage.target_ticks * tick_size
-        )
+        if stopped:
+            stop_base = float(bar.open) if float(bar.open) < trade.stop else trade.stop
+            trade.exit_price = stop_base - slippage.stop_ticks * tick_size
+        elif float(bar.open) > trade.target:
+            trade.exit_price = float(bar.open)
+        else:
+            trade.exit_price = trade.target - slippage.target_ticks * tick_size
         pnl = trade.exit_price - float(trade.fill_price)
     else:
-        trade.exit_price = (
-            trade.stop + slippage.stop_ticks * tick_size if stopped
-            else trade.target + slippage.target_ticks * tick_size
-        )
+        if stopped:
+            stop_base = float(bar.open) if float(bar.open) > trade.stop else trade.stop
+            trade.exit_price = stop_base + slippage.stop_ticks * tick_size
+        elif float(bar.open) < trade.target:
+            trade.exit_price = float(bar.open)
+        else:
+            trade.exit_price = trade.target + slippage.target_ticks * tick_size
         pnl = float(trade.fill_price) - trade.exit_price
     planned_risk = abs(trade.entry_ref - trade.stop)
     trade.result_r = round(pnl / planned_risk, 6)
@@ -294,7 +300,13 @@ def run_backtest(
         if not fresh:
             continue
         gate = _gate(
-            scan_result.state, fresh, store, config, persist=False, history=ledger,
+            scan_result.state,
+            fresh,
+            store,
+            config,
+            persist=False,
+            history=ledger,
+            now_ts=scan_result.state.as_of_close_ts,
         )
         for decision in gate.evaluations:
             for check in decision.checklist:

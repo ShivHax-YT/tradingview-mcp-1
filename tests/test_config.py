@@ -1,6 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
-from futures_copilot.config import Config
+from futures_copilot.config import Config, SlippageConfig
 from futures_copilot.errors import ConfigError
 
 
@@ -32,3 +33,17 @@ def test_missing_config_raises_config_error(tmp_path):
 
     with pytest.raises(ConfigError):
         load_config(tmp_path / "nope.yaml")
+
+
+def test_stop_slippage_has_a_two_tick_minimum(config):
+    assert all(item.stop_ticks >= 2 for item in config.backtest.slippage.values())
+    with pytest.raises(ValidationError):
+        SlippageConfig(stop_ticks=1)
+
+
+def test_feed_staleness_defaults_to_180_and_must_be_positive(config):
+    assert config.risk.max_feed_staleness_s == 180
+    raw = config.model_dump()
+    raw["risk"]["max_feed_staleness_s"] = 0
+    with pytest.raises(ValidationError):
+        Config(**raw)

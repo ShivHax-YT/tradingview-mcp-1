@@ -36,6 +36,7 @@ class TvMcpConfig(BaseModel):
     cdp_port: int = 9222
     request_timeout_s: int = 30
     max_bars_per_call: int = 500
+    max_live_data_latency_s: float = Field(default=5.0, gt=0)
 
 
 class BackfillConfig(BaseModel):
@@ -104,6 +105,7 @@ class RiskConfig(BaseModel):
     max_signals_per_session: int = 2
     max_signals_per_day: int = 3
     signal_expiry_candles: int = 3
+    max_feed_staleness_s: int = Field(default=180, gt=0)
     reclaim_max_candles: int = 3
     max_stop_atr_mult: float = 2.0
     max_entry_distance_atr_mult: float = 0.5
@@ -192,14 +194,14 @@ class SlippageConfig(BaseModel):
     """Conservative adverse fills expressed in contract ticks."""
 
     entry_ticks: int = 1
-    stop_ticks: int = 2
+    stop_ticks: int = Field(default=2, ge=2)
     target_ticks: int = 1
 
 
 class BacktestConfig(BaseModel):
     slippage: dict[str, SlippageConfig] = Field(default_factory=lambda: {
         "MNQ": SlippageConfig(entry_ticks=1, stop_ticks=2, target_ticks=1),
-        "MES": SlippageConfig(entry_ticks=1, stop_ticks=1, target_ticks=1),
+        "MES": SlippageConfig(entry_ticks=1, stop_ticks=2, target_ticks=1),
     })
 
 

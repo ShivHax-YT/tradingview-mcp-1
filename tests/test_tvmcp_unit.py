@@ -8,6 +8,7 @@ sandbox; it is exercised on the user's machine via `copilot health` and
 import asyncio
 import threading
 import time
+from contextlib import nullcontext
 
 import pytest
 
@@ -17,8 +18,10 @@ from futures_copilot.data.tvmcp import (
     _normalize_epoch_seconds,
     _symbol_root,
 )
+from futures_copilot.data.collector import collect_once
 from futures_copilot.errors import (
     BridgeNotFound,
+    DataLatencyError,
     DataSourceError,
     SymbolMismatch,
     UnsupportedTimeframe,
@@ -73,6 +76,102 @@ def test_resolution_mapping(config):
     src = TradingViewMcpCandleSource(config)
     assert src._resolution_for("1m") == "1"
     assert src._resolution_for("1h") == "60"
+
+
+def _stub_ohlcv(monkeypatch, source, bars):
+    monkeypatch.setattr(source, "_chart_transaction", lambda: nullcontext())
+    monkeypatch.setattr(source, "_ensure_chart_locked", lambda *_args: None)
+    monkeypatch.setattr(source, "_call", lambda *_args, **_kwargs: {"bars": bars})
+
+
+def _raw_bar(**updates):
+    bar = {
+        "time": 1_750_000_000,
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 10.0,
+    }
+    bar.update(updates)
+    return bar
+
+
+@pytest.mark.parametrize(
+    "bad_bar",
+    [
+        _raw_bar(open=float("nan")),
+        _raw_bar(high=float("inf")),
+        _raw_bar(low=float("-inf")),
+        _raw_bar(close=0),
+        _raw_bar(open=-1),
+        _raw_bar(high=98, low=99),
+        _raw_bar(high=100, open=101),
+        _raw_bar(low=100, close=99.5),
+        _raw_bar(volume=-1),
+        _raw_bar(volume=float("nan")),
+    ],
+)
+def test_get_candles_rejects_malformed_bar(config, monkeypatch, bad_bar):
+    source = TradingViewMcpCandleSource(config)
+    _stub_ohlcv(monkeypatch, source, [_raw_bar(time=1_749_999_940), bad_bar])
+
+    with pytest.raises(DataSourceError) as exc:
+        source.get_candles("MNQ", "1m", 2)
+
+    assert "offending bar=" in str(exc.value)
+
+
+def test_malformed_middle_bar_rejects_entire_collection_batch(config, store, monkeypatch):
+    source = TradingViewMcpCandleSource(config)
+    bars = [
+        _raw_bar(time=1_749_999_880),
+        _raw_bar(time=1_749_999_940, low=102),
+        _raw_bar(time=1_750_000_000),
+    ]
+    _stub_ohlcv(monkeypatch, source, bars)
+
+    report = collect_once(config, source, store, ["MNQ"])
+
+    assert store.last_ts("MNQ", "1m") is None
+    assert report.errors and "offending bar=" in report.errors[0]
+
+
+def test_live_freshness_allows_five_seconds_and_rejects_overdue_bar(config, monkeypatch):
+    source = TradingViewMcpCandleSource(config)
+    source._last_observed_bar_ts[("MNQ", "1m")] = 1_000
+
+    monkeypatch.setattr("futures_copilot.data.tvmcp.time.time", lambda: 1_065.0)
+    source.assert_live_freshness("MNQ", "1m")
+
+    monkeypatch.setattr("futures_copilot.data.tvmcp.time.time", lambda: 1_065.001)
+    with pytest.raises(DataLatencyError, match="stale live data"):
+        source.assert_live_freshness("MNQ", "1m")
+
+
+def test_stale_live_collection_fails_closed_before_store(config, store, monkeypatch):
+    source = TradingViewMcpCandleSource(config)
+    active_ts = 1_750_000_000
+    _stub_ohlcv(monkeypatch, source, [
+        _raw_bar(time=active_ts - 60),
+        _raw_bar(time=active_ts),
+    ])
+    monkeypatch.setattr("futures_copilot.data.tvmcp.time.time", lambda: active_ts + 66.0)
+
+    report = collect_once(config, source, store, ["MNQ"])
+
+    assert store.last_ts("MNQ", "1m") is None
+    assert report.errors and "DATA_LATENCY" in report.errors[0]
+
+
+def test_live_quote_without_source_timestamp_fails_closed(config, monkeypatch):
+    source = TradingViewMcpCandleSource(config)
+    monkeypatch.setattr(source, "_chart_transaction", lambda: nullcontext())
+    monkeypatch.setattr(source, "_ensure_chart_locked", lambda *_args: None)
+    monkeypatch.setattr(source, "_call", lambda *_args, **_kwargs: {"header_price": 100})
+
+    with pytest.raises(DataLatencyError, match="no source timestamp"):
+        source.get_quote("MNQ")
 
 
 def test_close_waits_for_lifecycle_cleanup_after_cancel(config):

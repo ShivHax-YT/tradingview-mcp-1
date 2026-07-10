@@ -443,7 +443,9 @@ def test_desk_mode_status_helper(config, store, tmp_path):
     evaluate(result.state, result.candidates, store, config, persist=True)
     config.vault.session_prep_dir = str(tmp_path / "prep")
 
-    ov = D.load_overview(store, config, "MNQ")
+    ov = D.load_overview(
+        store, config, "MNQ", now_ts=result.state.as_of_close_ts,
+    )
     desk = D.desk_mode_status(store, config, ov["state"])
     assert desk["golden_hour"]["within"] is True     # fixture horizon is 10:25 ET
     assert desk["governor"]["clear"] is True

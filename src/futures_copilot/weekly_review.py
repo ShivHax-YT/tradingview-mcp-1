@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -260,7 +261,14 @@ def render_weekly_review(
 
 
 def weekly_review_path(config: Config, as_of: date) -> Path:
-    vault = Path(config.vault.path) if config.vault.path else config.root.parent / "Trading Brain"
+    configured = (
+        config.resolve(config.vault.path)
+        if config.vault.path
+        else config.root.parent / "Trading Brain"
+    )
+    vault = Path(os.path.normpath(str(configured)))
+    while vault != vault.parent and vault.name.casefold() == vault.parent.name.casefold():
+        vault = vault.parent
     if not vault.is_dir():
         raise ReviewError(
             f"Obsidian vault does not exist: {vault}",

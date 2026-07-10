@@ -57,6 +57,12 @@ class NoBarsReturned(DataSourceError):
     code = "NO_BARS_RETURNED"
 
 
+class DataLatencyError(DataSourceError):
+    """The live chart's active bar failed to advance on time."""
+
+    code = "DATA_LATENCY"
+
+
 class UnsupportedTimeframe(DataSourceError):
     code = "UNSUPPORTED_TIMEFRAME"
 

@@ -17,6 +17,7 @@ maintained list. No calendar scraping, no third-party feeds, by design.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -34,6 +35,10 @@ ET = ZoneInfo("America/New_York")
 
 DECISIONS = ("LONG", "SHORT", "WAIT", "REJECT")
 ROLL_WINDOW_REJECT_REASON = "Roll window active - contract rollover in progress"
+
+
+def _wall_time() -> float:
+    return time.time()
 
 
 @dataclass(frozen=True)
@@ -145,8 +150,22 @@ def _roll_window_reject(cand: SignalCandidate) -> GateDecision:
 
 def _evaluate_candidate(
     cand: SignalCandidate, state: MarketState, store: Store, config: Config,
-    passed_this_run: dict[str, int], counting_from_table: bool, history=None,
+    passed_this_run: dict[str, int], counting_from_table: bool, now_ts: float,
+    history=None,
 ) -> GateDecision:
+    r = config.risk
+    horizon = state.as_of_close_ts
+    feed_age_s = max(0.0, float(now_ts) - horizon)
+    if feed_age_s > r.max_feed_staleness_s:
+        return GateDecision(
+            decision="WAIT",
+            candidate=cand,
+            checklist=[CheckResult("feed_fresh", False, "stale feed")],
+            reasons=["stale feed"],
+            warnings=list(cand.warnings),
+            invalidation=[],
+        )
+
     # Roll gate — anchored to TRADING days (the 18:00 ET boundary), not raw
     # calendar dates, and checked at BOTH ends of the decision: the bar that
     # created the candidate AND the horizon the decision is made at. Every
@@ -159,14 +178,28 @@ def _evaluate_candidate(
     if is_in_roll_window(cand_day) or is_in_roll_window(horizon_day):
         return _roll_window_reject(cand)
 
-    r = config.risk
-    horizon = state.as_of_close_ts
     tf_s = TF_SECONDS.get(cand.detection_timeframe, 300)
     atr = cand.context.get("atr") or state.atr_5m
     checks: list[CheckResult] = []
+    indeterminate_checks: set[str] = set()
 
     def check(name: str, ok: bool, detail: str) -> None:
         checks.append(CheckResult(name, bool(ok), detail))
+
+    def indeterminate(name: str, detail: str) -> None:
+        indeterminate_checks.add(name)
+        check(name, False, detail)
+
+    feed_fresh = True
+    check(
+        "feed_fresh",
+        feed_fresh,
+        (
+            f"feed age {feed_age_s:.1f}s within {r.max_feed_staleness_s}s limit"
+            if feed_fresh
+            else "stale feed"
+        ),
+    )
 
     # geometry present + sane (SignalCandidate validates, re-checked for audit trail)
     check("stop_and_target_required",
@@ -193,7 +226,7 @@ def _evaluate_candidate(
         check("entry_not_chased", run_past <= max_run,
               f"price {price} is {max(0.0, run_past):.2f} past the zone (max {max_run:.2f})")
     else:
-        check("entry_not_chased", True, "no ATR available — cannot judge; see warnings")
+        indeterminate("entry_not_chased", "no ATR available — WAIT; cannot judge entry chase")
 
     # stop width cap
     if atr:
@@ -205,8 +238,8 @@ def _evaluate_candidate(
         check("target_not_too_close", tgt_dist >= r.min_target_atr_mult * atr,
               f"target distance {tgt_dist:.2f} vs min {r.min_target_atr_mult * atr:.2f}")
     else:
-        check("stop_width_within_atr_cap", True, "no ATR — cannot judge")
-        check("target_not_too_close", True, "no ATR — cannot judge")
+        indeterminate("stop_width_within_atr_cap", "no ATR available — WAIT; cannot judge stop width")
+        indeterminate("target_not_too_close", "no ATR available — WAIT; cannot judge target distance")
 
     # session filter
     check("session_allowed", cand.session in r.allowed_sessions,
@@ -262,7 +295,7 @@ def _evaluate_candidate(
         check("not_chop", day_span >= min_span,
               f"day span {day_span:.2f} vs min {min_span:.2f} ({r.chop_min_day_range_atr_mult}x ATR15)")
     else:
-        check("not_chop", True, "insufficient data to judge chop — allowed with warning")
+        indeterminate("not_chop", "missing day range or ATR15 — WAIT; cannot judge chop")
 
     # manual news blackout windows
     hit = _news_blackout(config, horizon)
@@ -285,9 +318,6 @@ def _evaluate_candidate(
     failed = [c for c in checks if not c.passed]
     reasons = [f"{c.check}: {c.detail}" for c in failed]
     warnings = list(cand.warnings)
-    for c in checks:
-        if c.passed and "cannot judge" in c.detail:
-            warnings.append(f"{c.check}: {c.detail}")
 
     if cand.direction == "long":
         invalidation = [f"5m close below stop {cand.stop}",
@@ -296,19 +326,36 @@ def _evaluate_candidate(
         invalidation = [f"5m close above stop {cand.stop}",
                         f"5m close back above swept level {cand.context.get('swept_price')}"]
 
-    decision = "REJECT" if failed else cand.direction.upper()
+    hard_failed = [
+        c for c in failed
+        if c.check not in indeterminate_checks and c.check != "feed_fresh"
+    ]
+    if not feed_fresh:
+        decision = "WAIT"
+        reasons = ["stale feed"]
+    elif hard_failed:
+        decision = "REJECT"
+    elif failed:
+        decision = "WAIT"
+    else:
+        decision = cand.direction.upper()
     return GateDecision(decision=decision, candidate=cand, checklist=checks,
                         reasons=reasons, warnings=warnings, invalidation=invalidation)
 
 
 def evaluate(
     state: MarketState, candidates: list[SignalCandidate], store: Store, config: Config,
-    persist: bool = True, history=None,
+    persist: bool = True, history=None, now_ts: float | None = None,
 ) -> GateOutput:
     """Gate a scan's candidates. Persists LONG/SHORT/REJECT signal rows
-    (decision written here and ONLY here). WAIT is returned, not persisted."""
+    (decision written here and ONLY here). Candidate-based WAIT is persisted
+    for an auditable fail-closed trail; no-candidate WAIT has no row to write."""
     if not candidates:
         return GateOutput(decision="WAIT", chosen=None, evaluations=[])
+
+    # Fail closed for new/direct callers. Historical replay must opt into its
+    # deterministic clock explicitly (the backtest engine does this).
+    decision_now_ts = _wall_time() if now_ts is None else float(now_ts)
 
     ordered = sorted(candidates, key=lambda c: (c.grade, -c.rr))
     evaluations: list[GateDecision] = []
@@ -316,13 +363,26 @@ def evaluate(
 
     for cand in ordered:
         gd = _evaluate_candidate(cand, state, store, config, passed_this_run,
-                                 counting_from_table=persist, history=history)
+                                 counting_from_table=persist, now_ts=decision_now_ts,
+                                 history=history)
         if gd.decision in ("LONG", "SHORT"):
             passed_this_run[f"s:{cand.session}"] = passed_this_run.get(f"s:{cand.session}", 0) + 1
             passed_this_run["day"] = passed_this_run.get("day", 0) + 1
         if persist:
-            dup = store.signal_exists(cand.symbol, cand.ts, cand.setup_type, cand.direction,
-                                      swept_level=cand.context.get("swept_level"))
+            # A WAIT must supersede an earlier actionable row for the same
+            # candidate. Reusing the LONG/SHORT duplicate would resurrect it
+            # in dashboard consumers, so WAIT always writes a new audit row.
+            dup = (
+                None
+                if gd.decision == "WAIT"
+                else store.signal_exists(
+                    cand.symbol,
+                    cand.ts,
+                    cand.setup_type,
+                    cand.direction,
+                    swept_level=cand.context.get("swept_level"),
+                )
+            )
             if dup is not None:
                 gd = GateDecision(**{**gd.__dict__, "signal_id": dup, "duplicate": True})
             else:
@@ -347,4 +407,6 @@ def evaluate(
     if passing:
         chosen = passing[0]
         return GateOutput(decision=chosen.decision, chosen=chosen, evaluations=evaluations)
+    if any(g.decision == "WAIT" for g in evaluations):
+        return GateOutput(decision="WAIT", chosen=None, evaluations=evaluations)
     return GateOutput(decision="REJECT", chosen=None, evaluations=evaluations)

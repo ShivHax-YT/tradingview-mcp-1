@@ -65,6 +65,9 @@ class ResilientMcpResource:
     def get_candles(self, symbol: str, timeframe: str, count: int):
         return self._invoke("get_candles", symbol, timeframe, count)
 
+    def assert_live_freshness(self, symbol: str, timeframe: str) -> None:
+        self._invoke("assert_live_freshness", symbol, timeframe)
+
     def get_quote(self, symbol: str) -> dict:
         return self._invoke("get_quote", symbol)
 

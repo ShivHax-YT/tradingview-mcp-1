@@ -72,6 +72,7 @@ def collect_once(config: Config, source: CandleSource, store: Store, symbols: li
         try:
             last = store.last_ts(symbol, tf)
             candles = source.get_candles(symbol, tf, config.data.tvmcp.max_bars_per_call - 1)
+            source.assert_live_freshness(symbol, tf)
             if last is not None:
                 candles = [c for c in candles if c.ts > last]
             report.add(symbol, tf, store.upsert_candles(candles))

@@ -31,3 +31,13 @@ def store(tmp_path):
 def fixture_csv():
     assert FIXTURE_CSV.exists(), "run scripts/generate_fixture.py first"
     return FIXTURE_CSV
+
+
+@pytest.fixture(autouse=True)
+def deterministic_default_gate_clock(monkeypatch):
+    """Existing strategy fixtures are historical; keep their implicit clock replay-safe.
+
+    Dedicated freshness tests override this clock or pass ``now_ts`` explicitly.
+    Production code still defaults to the real wall clock.
+    """
+    monkeypatch.setattr("futures_copilot.gate.risk_gate._wall_time", lambda: 0.0)

@@ -19,17 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ..config import Config
 from ..errors import (
     BridgeNotFound,
     CdpUnreachable,
     ChartNotReady,
+    DataLatencyError,
     DataSourceError,
     NoBarsReturned,
     SymbolMismatch,
@@ -38,6 +42,7 @@ from ..errors import (
 from ..models import Candle
 from ..utils.symbols import normalize_symbol
 from .base import CandleSource
+from .resample import tf_seconds
 
 # Explicit allowlist: every bridge tool this adapter is permitted to call.
 # Chart reading + navigation only. No alerts, no drawing, no UI automation,
@@ -57,6 +62,62 @@ def _normalize_epoch_seconds(t: float | int) -> int:
     """Bridge bar times come from TradingView internals; normalize ms -> s if needed."""
     t = int(t)
     return t // 1000 if t > 10_000_000_000 else t
+
+
+def _candle_from_raw_bar(symbol: str, timeframe: str, raw: dict) -> Candle:
+    """Convert one bridge bar only after strict, typed OHLCV validation."""
+    try:
+        ts = _normalize_epoch_seconds(raw["time"])
+        open_price = float(raw["open"])
+        high = float(raw["high"])
+        low = float(raw["low"])
+        close = float(raw["close"])
+        volume = float(raw.get("volume") or 0.0)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise DataSourceError(
+            f"malformed ({symbol}, {timeframe}) bar: {exc}; offending bar={raw!r}",
+            hint="fix or reject the malformed TradingView bridge payload; no bars were stored",
+        ) from exc
+
+    prices = {"open": open_price, "high": high, "low": low, "close": close}
+    bad_price = next(
+        (name for name, value in prices.items() if not math.isfinite(value) or value <= 0),
+        None,
+    )
+    reason = None
+    if bad_price is not None:
+        reason = f"{bad_price} must be finite and > 0"
+    elif high < low:
+        reason = "high is below low"
+    elif high < max(open_price, close):
+        reason = "high is below open or close"
+    elif low > min(open_price, close):
+        reason = "low is above open or close"
+    elif not math.isfinite(volume) or volume < 0:
+        reason = "volume must be finite and >= 0"
+    if reason is not None:
+        raise DataSourceError(
+            f"invalid ({symbol}, {timeframe}) bar: {reason}; offending bar={raw!r}",
+            hint="fix or reject the malformed TradingView bridge payload; no bars were stored",
+        )
+
+    try:
+        return Candle(
+            symbol=symbol,
+            timeframe=timeframe,
+            ts=ts,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            source="tvmcp",
+        )
+    except ValidationError as exc:
+        raise DataSourceError(
+            f"invalid ({symbol}, {timeframe}) bar model: {exc}; offending bar={raw!r}",
+            hint="fix or reject the malformed TradingView bridge payload; no bars were stored",
+        ) from exc
 
 
 def _symbol_root(chart_symbol: str) -> str:
@@ -91,6 +152,7 @@ class TradingViewMcpCandleSource(CandleSource):
         self._reaper_started = False
         self._chart_mutex = threading.RLock()
         self._workspace_lock_path = config.resolve(".copilot.lock")
+        self._last_observed_bar_ts: dict[tuple[str, str], int] = {}
 
     @contextmanager
     def _chart_transaction(self):
@@ -443,33 +505,66 @@ class TradingViewMcpCandleSource(CandleSource):
                 hint="chart may still be loading; scroll the chart or wait and retry",
             )
 
-        candles: list[Candle] = []
-        for b in bars:
-            candles.append(
-                Candle(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    ts=_normalize_epoch_seconds(b["time"]),
-                    open=float(b["open"]),
-                    high=float(b["high"]),
-                    low=float(b["low"]),
-                    close=float(b["close"]),
-                    volume=float(b.get("volume") or 0.0),
-                    source="tvmcp",
-                )
-            )
+        candles = [_candle_from_raw_bar(symbol, timeframe, bar) for bar in bars]
         candles.sort(key=lambda c: c.ts)
+        self._last_observed_bar_ts[(symbol, timeframe)] = candles[-1].ts
 
         if self.config.data.collect.drop_unclosed_last_bar and candles:
             candles = candles[:-1]  # newest bar is still forming on a live chart
         return candles[-count:]
+
+    def assert_live_freshness(self, symbol: str, timeframe: str) -> None:
+        """Require the active chart bar to advance within five seconds.
+
+        TradingView timestamps identify the bar's OPEN, not the last tick. A
+        healthy active 1m bar may therefore be up to 60 seconds old. Staleness
+        begins only after that bar's expected close boundary plus the configured
+        latency allowance. This live-only check is intentionally not used by
+        historical backfill.
+        """
+        observed_ts = self._last_observed_bar_ts.get((symbol, timeframe))
+        if observed_ts is None:
+            raise DataLatencyError(
+                f"no live bar timestamp observed for ({symbol}, {timeframe})",
+                hint="refresh the TradingView chart and retry; live collection failed closed",
+            )
+        now_ts = time.time()
+        allowance = float(self.tv.max_live_data_latency_s)
+        expected_close = observed_ts + tf_seconds(timeframe)
+        overdue_s = now_ts - expected_close
+        future_skew_s = observed_ts - now_ts
+        if overdue_s > allowance:
+            raise DataLatencyError(
+                f"stale live data for ({symbol}, {timeframe}): active bar is "
+                f"{overdue_s:.3f}s past its expected close boundary "
+                f"(max {allowance:g}s)",
+                hint="check TradingView market-data updates and the MCP bridge; no bars were stored",
+            )
+        if future_skew_s > allowance:
+            raise DataLatencyError(
+                f"live data clock skew for ({symbol}, {timeframe}): bar timestamp is "
+                f"{future_skew_s:.3f}s ahead of the machine clock (max {allowance:g}s)",
+                hint="check the Windows clock and TradingView timestamps; no bars were stored",
+            )
 
     def get_quote(self, symbol: str) -> dict:
         """Read the current 1m chart quote without storing the forming bar."""
         with self._chart_transaction():
             self._ensure_chart_locked(symbol, self.config.data.collect.timeframe)
             payload = self._call("quote_get")
-        for key in ("time",):
-            if payload.get(key) is not None:
-                payload[key] = _normalize_epoch_seconds(payload[key])
+        raw_time = payload.get("time")
+        if raw_time is None:
+            raise DataLatencyError(
+                f"live quote for {symbol} has no source timestamp",
+                hint="refresh the TradingView chart and retry; quote tracking failed closed",
+            )
+        try:
+            payload["time"] = _normalize_epoch_seconds(raw_time)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DataLatencyError(
+                f"live quote for {symbol} has an invalid source timestamp: {raw_time!r}",
+                hint="check the TradingView MCP payload; quote tracking failed closed",
+            ) from exc
+        self._last_observed_bar_ts[(symbol, self.config.data.collect.timeframe)] = payload["time"]
+        self.assert_live_freshness(symbol, self.config.data.collect.timeframe)
         return payload

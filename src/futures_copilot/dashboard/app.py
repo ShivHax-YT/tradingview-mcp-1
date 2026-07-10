@@ -9,6 +9,7 @@ shows what Python computed and lets you journal what YOU decided.
 
 from __future__ import annotations
 
+import math
 import time
 
 from futures_copilot.dashboard import data as D
@@ -25,7 +26,9 @@ def _refresh_symbol(config, symbol: str, source) -> str:
         store.init_schema()
         report = backfill(config, source, store, [symbol])
         result = scan(store, config, symbol, persist=True)
-        gate = evaluate(result.state, result.candidates, store, config, persist=True)
+        gate = evaluate(
+            result.state, result.candidates, store, config, persist=True, now_ts=time.time(),
+        )
     return f"{report.summary()} | scan: {gate.summary()}"
 
 
@@ -40,21 +43,41 @@ def _collect_symbol(config, symbol: str, source) -> str:
         store.init_schema()
         report = collect_once(config, source, store, [symbol])
         result = scan(store, config, symbol, persist=True)
-        gate = evaluate(result.state, result.candidates, store, config, persist=True)
+        gate = evaluate(
+            result.state, result.candidates, store, config, persist=True, now_ts=time.time(),
+        )
     return f"{report.summary()} | scan: {gate.summary()}"
 
 
 def _quote_symbol(config, symbol: str, source) -> dict:
     """Fast read of the forming 1m chart price. This is display-only."""
     q = source.get_quote(symbol)
-    price = q.get("header_price") or q.get("last") or q.get("close")
+    price = None
+    for key in ("header_price", "last", "close"):
+        try:
+            candidate = float(q.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(candidate) and candidate > 0:
+            price = candidate
+            break
     return {
         "symbol": symbol,
-        "price": float(price),
+        "status": "live" if price is not None else "no_quote",
+        "price": price,
         "quote_time": q.get("time"),
-        "synced_at": time.time(),
+        "synced_at": time.time() if price is not None else None,
         "source": "TradingView quote_get",
     }
+
+
+def _record_live_quote(session_state, quote: dict) -> bool:
+    """Store a quote; stamp the throttle clock only for a usable live price."""
+    session_state["live_quote"] = quote
+    if quote.get("status") != "live" or quote.get("price") is None:
+        return False
+    session_state["live_last_quote_ts"] = time.time()
+    return True
 
 
 def _candles_fig(df, state):
@@ -166,15 +189,19 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
             @st.fragment(run_every=f"{int(visual_interval)}s")
             def live_mode_tick() -> None:
                 now = time.time()
-                last_quote = float(st.session_state.get("live_last_quote_ts", 0.0))
+                last_quote = max(
+                    float(st.session_state.get("live_last_quote_ts", 0.0)),
+                    float(st.session_state.get("live_last_quote_attempt_ts", 0.0)),
+                )
                 last_collect = float(st.session_state.get("live_last_collect_ts", 0.0))
                 next_quote_in = max(0, int(price_interval - (now - last_quote)))
                 next_collect_in = max(0, int(scan_interval - (now - last_collect)))
                 changed = False
                 if now - last_quote >= price_interval:
+                    st.session_state["live_last_quote_attempt_ts"] = now
                     try:
-                        st.session_state["live_quote"] = _quote_symbol(config, symbol, mcp_source())
-                        st.session_state["live_last_quote_ts"] = time.time()
+                        quote = _quote_symbol(config, symbol, mcp_source())
+                        _record_live_quote(st.session_state, quote)
                         st.session_state["live_quote_error"] = None
                         changed = True
                     except Exception as e:
@@ -182,7 +209,6 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         st.session_state["live_quote_error"] = (
                             f"{type(e).__name__}: {e}" + (f"\n\nFix: {hint}" if hint else "")
                         )
-                        st.session_state["live_last_quote_ts"] = time.time()
                 if now - last_collect >= scan_interval:
                     with st.spinner("Live Mode: collecting closed 1m bars and rescanning..."):
                         try:
@@ -205,10 +231,15 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                 live_status = st.session_state.get("live_status", "warming up")
                 state_class = "error" if live_error else "ok"
                 quote = st.session_state.get("live_quote") or {}
-                quote_txt = (
-                    f'price {quote.get("price", 0):,.2f} synced {int(max(0, time.time() - quote.get("synced_at", time.time())))}s ago'
-                    if quote else "price sync warming up"
-                )
+                if quote.get("status") == "no_quote":
+                    quote_txt = "no quote available"
+                elif quote:
+                    quote_txt = (
+                        f'price {quote["price"]:,.2f} synced '
+                        f'{int(max(0, time.time() - quote.get("synced_at", time.time())))}s ago'
+                    )
+                else:
+                    quote_txt = "price sync warming up"
                 detail = escape(live_error or f"{quote_txt}\n{live_status}")
                 st.markdown(
                     f'<div class="live-card {state_class}">'
@@ -261,8 +292,12 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
         state = ov["state"]
         gv = D.gate_view(ov["latest_signal"])
         live_quote = st.session_state.get("live_quote") or {}
-        quote_age = time.time() - float(live_quote.get("synced_at", 0.0))
-        quote_is_fresh = live_quote.get("symbol") == symbol and quote_age <= 10
+        quote_age = time.time() - float(live_quote.get("synced_at") or 0.0)
+        quote_is_fresh = (
+            live_quote.get("status") == "live"
+            and live_quote.get("symbol") == symbol
+            and quote_age <= 10
+        )
         display_price = float(live_quote["price"]) if state and quote_is_fresh else (
             float(state["current_price"]) if state else None
         )
@@ -285,7 +320,9 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                         f'<span class="chip {chip}"><span class="dot"></span>{sess or "closed"}</span>',
                         unsafe_allow_html=True)
         with h3:
-            fresh, age = D.freshness(ov["state_row"])
+            fresh, age = D.freshness(
+                ov["state_row"], config.risk.max_feed_staleness_s,
+            )
             chip = "green" if fresh == "live" else ("amber" if fresh == "stale" else "gray")
             label = "no data" if age is None else (f"{age}m old" if age < 600 else "very stale")
             st.markdown('<div class="microlabel">Data</div>'
@@ -475,12 +512,21 @@ def main() -> None:  # pragma: no cover - UI wiring, smoke-tested via AppTest
                 st.markdown(f'<div class="stat"><span class="k">vault prep cache</span>'
                             f'<span class="v">{"cached" if prep.get("exists") else "none — optional, run `copilot prep`"}'
                             f'</span></div>', unsafe_allow_html=True)
-                fresh2, age2 = D.freshness(ov["state_row"])
+                fresh2, age2 = D.freshness(
+                    ov["state_row"], config.risk.max_feed_staleness_s,
+                )
                 st.markdown(f'<div class="stat"><span class="k">closed-candle scan</span>'
                             f'<span class="v">{fresh2}{f" · {age2}m old" if age2 is not None else ""}'
                             f'</span></div>', unsafe_allow_html=True)
-                q_txt = (f'{int(quote_age)}s old' if quote_is_fresh
-                         else ("stale" if live_quote else "off (enable Live mode)"))
+                q_txt = (
+                    f'{int(quote_age)}s old'
+                    if quote_is_fresh
+                    else (
+                        "no quote"
+                        if live_quote.get("status") == "no_quote"
+                        else ("stale" if live_quote else "off (enable Live mode)")
+                    )
+                )
                 st.markdown(f'<div class="stat"><span class="k">live quote sync</span>'
                             f'<span class="v">{q_txt}</span></div>', unsafe_allow_html=True)
 

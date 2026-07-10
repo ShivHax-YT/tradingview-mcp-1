@@ -118,6 +118,100 @@ def test_chop_filter_reject(config, store, scanned):
     assert any(r.startswith("not_chop") for r in out.evaluations[0].reasons)
 
 
+def test_frozen_feed_inside_golden_hour_waits(config, store, scanned):
+    state, cands = scanned
+    candidate = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    out = evaluate(
+        state,
+        [candidate],
+        store,
+        config,
+        persist=True,
+        now_ts=state.as_of_close_ts + config.risk.max_feed_staleness_s + 1,
+    )
+
+    assert out.decision == "WAIT"
+    assert out.chosen is None
+    assert out.evaluations[0].reasons == ["stale feed"]
+    assert not next(c for c in out.evaluations[0].checklist if c.check == "feed_fresh").passed
+    assert store.latest_signals("MNQ", limit=1)[0]["decision"] == "WAIT"
+
+
+def test_feed_freshness_boundary_is_inclusive(config, store, scanned):
+    state, cands = scanned
+    out = evaluate(
+        state,
+        cands,
+        store,
+        config,
+        persist=False,
+        now_ts=state.as_of_close_ts + config.risk.max_feed_staleness_s,
+    )
+
+    assert out.decision == "LONG"
+    assert next(c for c in out.evaluations[0].checklist if c.check == "feed_fresh").passed
+
+
+def test_gate_defaults_to_wall_clock_and_fails_closed(config, store, scanned, monkeypatch):
+    state, cands = scanned
+    monkeypatch.setattr(
+        "futures_copilot.gate.risk_gate._wall_time",
+        lambda: state.as_of_close_ts + config.risk.max_feed_staleness_s + 1,
+    )
+
+    out = evaluate(state, cands, store, config, persist=False)
+
+    assert out.decision == "WAIT"
+    assert all(item.reasons == ["stale feed"] for item in out.evaluations)
+
+
+def test_missing_entry_atr_fail_softs_to_wait_without_persisting(config, store, scanned):
+    state, cands = scanned
+    candidate = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    candidate = candidate.model_copy(update={
+        "context": {**candidate.context, "atr": None},
+    })
+    state = state.model_copy(update={"atr_5m": None})
+
+    out = evaluate(state, [candidate], store, config, persist=True)
+
+    assert out.decision == "WAIT"
+    failed = {c.check for c in out.evaluations[0].checklist if not c.passed}
+    assert {
+        "entry_not_chased",
+        "stop_width_within_atr_cap",
+        "target_not_too_close",
+    }.issubset(failed)
+    assert store.latest_signals("MNQ", limit=1)[0]["decision"] == "WAIT"
+
+
+def test_missing_atr_15m_fail_softs_chop_to_wait(config, store, scanned):
+    state, cands = scanned
+    candidate = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    state = state.model_copy(update={"atr_15m": None})
+
+    out = evaluate(state, [candidate], store, config, persist=False)
+
+    assert out.decision == "WAIT"
+    check = next(c for c in out.evaluations[0].checklist if c.check == "not_chop")
+    assert check.passed is False and "WAIT" in check.detail
+
+
+def test_missing_atr_does_not_hide_hard_reject(config, store, scanned):
+    state, cands = scanned
+    candidate = evaluate(state, cands, store, config, persist=False).chosen.candidate
+    candidate = candidate.model_copy(update={
+        "rr": 1.0,
+        "context": {**candidate.context, "atr": None},
+    })
+    state = state.model_copy(update={"atr_5m": None})
+
+    out = evaluate(state, [candidate], store, config, persist=False)
+
+    assert out.decision == "REJECT"
+    assert any(reason.startswith("min_rr") for reason in out.evaluations[0].reasons)
+
+
 def test_manual_news_blackout_reject(config, store, scanned):
     from futures_copilot.config import NewsBlackout
 

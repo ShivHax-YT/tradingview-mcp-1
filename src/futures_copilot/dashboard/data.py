@@ -44,12 +44,24 @@ def fmt_ts(ts: int | None) -> str:
     return to_et(int(ts)).strftime("%b %d · %H:%M ET")
 
 
-def freshness(state_row: dict | None) -> tuple[str, int | None]:
+def freshness(
+    state_row: dict | None,
+    max_age_s: int = 180,
+    *,
+    now_ts: float | None = None,
+) -> tuple[str, int | None]:
     """('live'|'stale'|'none', minutes_old)."""
     if not state_row:
         return "none", None
-    age_min = int((time.time() - int(state_row["ts"])) // 60)
-    return ("live" if age_min <= 5 else "stale"), age_min
+    horizon = int(state_row["ts"])
+    try:
+        state = json.loads(state_row["json_state"])
+        horizon = int(state.get("as_of_close_ts") or horizon)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    age_s = max(0.0, (time.time() if now_ts is None else float(now_ts)) - horizon)
+    age_min = int(age_s // 60)
+    return ("live" if age_s <= max_age_s else "stale"), age_min
 
 
 def _candidate_is_current(row: dict[str, Any], state: dict[str, Any] | None, config: Config) -> bool:
@@ -66,14 +78,38 @@ def _candidate_is_current(row: dict[str, Any], state: dict[str, Any] | None, con
     return horizon <= confirmed + config.risk.signal_expiry_candles * tf_s
 
 
-def load_overview(store: Store, config: Config | str, symbol: str | None = None) -> dict[str, Any]:
+def _state_is_gate_eligible(
+    state: dict[str, Any] | None,
+    config: Config,
+    *,
+    now_ts: float | None = None,
+) -> bool:
+    """Prevent a prior actionable signal from resurfacing after a gate WAIT."""
+    if not state:
+        return False
+    horizon = int(state.get("as_of_close_ts") or state.get("ts") or 0)
+    age_s = max(0.0, (time.time() if now_ts is None else float(now_ts)) - horizon)
+    return age_s <= config.risk.max_feed_staleness_s
+
+
+def load_overview(
+    store: Store,
+    config: Config | str,
+    symbol: str | None = None,
+    *,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
     if symbol is None:
         symbol = str(config)
         config = load_config(find_config())
     ms_row = store.latest_market_state(symbol)
     state = json.loads(ms_row["json_state"]) if ms_row else None
     sig_rows = store.latest_signals(symbol, limit=12)
-    current_sigs = [r for r in sig_rows if state and _signal_is_current(r, state, config)]
+    gate_eligible = _state_is_gate_eligible(state, config, now_ts=now_ts)
+    current_sigs = [
+        r for r in sig_rows
+        if gate_eligible and state and _signal_is_current(r, state, config)
+    ]
     latest_sig = current_sigs[0] if current_sigs else None
     candidate_rows = store.latest_strategy_outputs(symbol, limit=8)
     current_candidates = [r for r in candidate_rows if _candidate_is_current(r, state, config)]

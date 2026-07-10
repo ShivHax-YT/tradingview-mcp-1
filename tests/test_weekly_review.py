@@ -4,12 +4,14 @@ import hashlib
 import json
 import re
 from datetime import date, timedelta
+from pathlib import Path
 
 from futures_copilot.weekly_review import (
     NARRATIVE_END,
     NARRATIVE_START,
     collect_weekly_review,
     render_weekly_review,
+    weekly_review_path,
     write_weekly_review,
 )
 
@@ -122,3 +124,23 @@ def test_weekly_writer_uses_iso_filename_and_preserves_manual_narrative(config, 
     write_weekly_review(store, config, as_of=as_of)
 
     assert "Keep this psychological insight." in path.read_text(encoding="utf-8")
+
+
+def test_weekly_review_path_collapses_duplicate_terminal_vault(config, tmp_path):
+    outer = tmp_path / "Trading Brain"
+    inner = outer / "Trading Brain"
+    inner.mkdir(parents=True)
+    config.vault.path = str(inner)
+
+    path = weekly_review_path(config, date(2026, 7, 10))
+
+    assert path == outer / "Weekly_Review_2026_W28.md"
+
+
+def test_weekly_review_path_terminates_for_filesystem_root(config):
+    root = Path(config.root.anchor)
+    config.vault.path = str(root)
+
+    path = weekly_review_path(config, date(2026, 7, 10))
+
+    assert path.parent == root

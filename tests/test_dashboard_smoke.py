@@ -24,7 +24,9 @@ def test_data_helpers_full_path(config, store):
     result = scan(store, config, "MNQ", persist=True)
     evaluate(result.state, result.candidates, store, config, persist=True)
 
-    ov = D.load_overview(store, "MNQ")
+    ov = D.load_overview(
+        store, config, "MNQ", now_ts=result.state.as_of_close_ts,
+    )
     assert ov["state"]["symbol"] == "MNQ"
     assert ov["signals"] and ov["candidates"]
 
@@ -43,6 +45,105 @@ def test_data_helpers_full_path(config, store):
 
     fresh, age = D.freshness(ov["state_row"])
     assert fresh in ("live", "stale") and age is not None
+
+    horizon = ov["state"]["as_of_close_ts"]
+    assert D.freshness(ov["state_row"], 180, now_ts=horizon + 180)[0] == "live"
+    assert D.freshness(ov["state_row"], 180, now_ts=horizon + 181)[0] == "stale"
+
+
+def test_quote_symbol_returns_distinct_no_quote_and_does_not_stamp_timestamp(config, monkeypatch):
+    from futures_copilot.dashboard.app import _quote_symbol, _record_live_quote
+
+    class EmptyQuoteSource:
+        def get_quote(self, _symbol):
+            return {"header_price": None, "last": None, "close": None, "time": 123}
+
+    quote = _quote_symbol(config, "MNQ", EmptyQuoteSource())
+    state = {"live_last_quote_ts": 99.0}
+    monkeypatch.setattr("futures_copilot.dashboard.app.time.time", lambda: 123.0)
+
+    assert quote["status"] == "no_quote" and quote["price"] is None
+    assert _record_live_quote(state, quote) is False
+    assert state["live_last_quote_ts"] == 99.0
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"header_price": None, "last": "101.25", "close": 100}, 101.25),
+        ({"header_price": None, "last": None, "close": 100.5}, 100.5),
+    ],
+)
+def test_quote_symbol_uses_usable_fallbacks(config, payload, expected):
+    from futures_copilot.dashboard.app import _quote_symbol
+
+    class QuoteSource:
+        def get_quote(self, _symbol):
+            return payload
+
+    quote = _quote_symbol(config, "MNQ", QuoteSource())
+    assert quote["status"] == "live" and quote["price"] == expected
+
+
+def test_overview_does_not_resurrect_long_after_wait(config, store):
+    seed_long_trap(store)
+    result = scan(store, config, "MNQ", persist=True)
+    first = evaluate(
+        result.state,
+        result.candidates,
+        store,
+        config,
+        persist=True,
+        now_ts=result.state.as_of_close_ts,
+    )
+    assert first.decision == "LONG"
+
+    missing = result.state.model_copy(update={"atr_5m": None})
+    missing_candidates = [
+        candidate.model_copy(update={
+            "context": {**candidate.context, "atr": None},
+        })
+        for candidate in result.candidates
+    ]
+    second = evaluate(
+        missing,
+        missing_candidates,
+        store,
+        config,
+        persist=True,
+        now_ts=missing.as_of_close_ts,
+    )
+    assert second.decision == "WAIT"
+    store.save_market_state(
+        missing.symbol, missing.ts, missing.session, missing.current_price, missing.to_json(),
+    )
+
+    overview = D.load_overview(
+        store, config, "MNQ", now_ts=missing.as_of_close_ts,
+    )
+    assert overview["latest_signal"]["decision"] == "WAIT"
+    assert D.gate_view(overview["latest_signal"])["decision"] == "WAIT"
+
+
+def test_overview_hides_prior_signal_when_feed_is_stale(config, store):
+    seed_long_trap(store)
+    result = scan(store, config, "MNQ", persist=True)
+    evaluate(
+        result.state,
+        result.candidates,
+        store,
+        config,
+        persist=True,
+        now_ts=result.state.as_of_close_ts,
+    )
+
+    overview = D.load_overview(
+        store,
+        config,
+        "MNQ",
+        now_ts=result.state.as_of_close_ts + config.risk.max_feed_staleness_s + 1,
+    )
+    assert overview["latest_signal"] is None
 
 
 def test_gate_view_handles_empty():
@@ -158,7 +259,9 @@ def test_dashboard_live_mode_controls_render(config, store):
     at.session_state["live_scan_interval"] = 60
     at.session_state["live_last_quote_ts"] = time.time()
     at.session_state["live_last_collect_ts"] = time.time()
-    at.session_state["live_quote"] = {"symbol": "MNQ", "price": 30100.0, "synced_at": time.time()}
+    at.session_state["live_quote"] = {
+        "symbol": "MNQ", "status": "live", "price": 30100.0, "synced_at": time.time(),
+    }
     at.session_state["live_status"] = "test live status"
     at.run(timeout=60)
 

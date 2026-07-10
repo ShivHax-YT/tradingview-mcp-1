@@ -60,7 +60,8 @@ def test_replay_calls_scan_and_gate_with_persist_false_and_tie_stops(config, sto
             candidates=[candidate],
         )
 
-    def gate(state, candidates, _store, _config, *, persist, history):
+    def gate(state, candidates, _store, _config, *, persist, history, now_ts):
+        assert now_ts == state.as_of_close_ts
         calls.append(("gate", state.as_of_close_ts, persist, history is not None))
         decisions = [GateDecision(
             decision="LONG", candidate=c, checklist=[CheckResult("golden_hour_allowed", True, "ok")],
@@ -97,7 +98,7 @@ def test_replay_is_exactly_deterministic(config, store):
             candidates=[candidate],
         )
 
-    def gate(state, candidates, _store, _config, *, persist, history):
+    def gate(state, candidates, _store, _config, *, persist, history, now_ts):
         decisions = [GateDecision("LONG", c, [], [], [], []) for c in candidates]
         return GateOutput("LONG" if decisions else "WAIT", decisions[0] if decisions else None, decisions)
 
@@ -120,7 +121,7 @@ def test_transient_rejection_is_reevaluated_until_candidate_passes(config, store
             candidates=[candidate],
         )
 
-    def gate(state, candidates, _store, _config, *, persist, history):
+    def gate(state, candidates, _store, _config, *, persist, history, now_ts):
         nonlocal gate_calls
         gate_calls += 1
         decision = "REJECT" if gate_calls == 1 else "LONG"
@@ -197,6 +198,99 @@ def test_partial_zone_touch_fill_stays_inside_bar(config):
     assert trade.fill_price == 99.80
 
 
+@pytest.mark.parametrize(
+    ("direction", "bar", "expected"),
+    [
+        ("long", SimpleNamespace(ts=1, open=99.75, high=100.5, low=99.5, close=100), 100.25),
+        ("short", SimpleNamespace(ts=1, open=100.25, high=100.5, low=99.5, close=100), 99.75),
+    ],
+)
+def test_entry_fill_uses_adverse_zone_edge_plus_slippage(config, direction, bar, expected):
+    candidate = _candidate(0, direction=direction)
+    trade = _new_trade(candidate, "2026-06-24", 0, config)
+    trade.eligible_ts = 1
+
+    assert _advance_trade(
+        trade, bar, tick_size=config.symbols["MNQ"].tick_size,
+        slippage=config.backtest.slippage["MNQ"],
+    ) is False
+
+    assert trade.status == "open"
+    assert trade.fill_price == expected
+
+
+@pytest.mark.parametrize(
+    ("direction", "open_price", "high", "low", "expected"),
+    [
+        ("long", 98.0, 99.5, 97.5, 97.5),
+        ("short", 102.0, 102.5, 100.5, 102.5),
+    ],
+)
+def test_stop_gap_fills_at_open_with_adverse_slippage(
+    config, direction, open_price, high, low, expected,
+):
+    candidate = _candidate(0, direction=direction)
+    trade = _new_trade(candidate, "2026-06-24", 0, config)
+    trade.status = "open"
+    trade.fill_price = candidate.entry_ref
+    bar = SimpleNamespace(ts=2, open=open_price, high=high, low=low, close=open_price)
+
+    assert _advance_trade(
+        trade, bar, tick_size=config.symbols["MNQ"].tick_size,
+        slippage=config.backtest.slippage["MNQ"],
+    ) is True
+
+    assert trade.status == "stop"
+    assert trade.exit_price == expected
+
+
+@pytest.mark.parametrize(
+    ("direction", "bar", "expected"),
+    [
+        ("long", SimpleNamespace(ts=2, open=100, high=100.5, low=98.75, close=99), 98.5),
+        ("short", SimpleNamespace(ts=2, open=100, high=101.25, low=99.5, close=101), 101.5),
+    ],
+)
+def test_normal_stop_touch_fills_at_stop_with_adverse_slippage(config, direction, bar, expected):
+    candidate = _candidate(0, direction=direction)
+    trade = _new_trade(candidate, "2026-06-24", 0, config)
+    trade.status = "open"
+    trade.fill_price = candidate.entry_ref
+
+    assert _advance_trade(
+        trade, bar, tick_size=config.symbols["MNQ"].tick_size,
+        slippage=config.backtest.slippage["MNQ"],
+    ) is True
+
+    assert trade.status == "stop"
+    assert trade.exit_price == expected
+
+
+@pytest.mark.parametrize(
+    ("direction", "open_price", "high", "low"),
+    [
+        ("long", 103.0, 103.5, 102.5),
+        ("short", 97.0, 97.5, 96.5),
+    ],
+)
+def test_target_gap_fills_at_favorable_open_when_provable(
+    config, direction, open_price, high, low,
+):
+    candidate = _candidate(0, direction=direction)
+    trade = _new_trade(candidate, "2026-06-24", 0, config)
+    trade.status = "open"
+    trade.fill_price = candidate.entry_ref
+    bar = SimpleNamespace(ts=2, open=open_price, high=high, low=low, close=open_price)
+
+    assert _advance_trade(
+        trade, bar, tick_size=config.symbols["MNQ"].tick_size,
+        slippage=config.backtest.slippage["MNQ"],
+    ) is True
+
+    assert trade.status == "target"
+    assert trade.exit_price == open_price
+
+
 def test_order_expiry_is_anchored_to_candidate_confirmation(config):
     candidate = _candidate(1_750_000_000)
     decision_ts = candidate.confirmed_close_ts + 120
@@ -241,7 +335,7 @@ def test_markdown_reports_filters_and_governor(config, store):
             candidates=[candidate],
         )
 
-    def gate(state, candidates, _store, _config, *, persist, history):
+    def gate(state, candidates, _store, _config, *, persist, history, now_ts):
         decisions = [GateDecision(
             "LONG", c, [CheckResult("trade_governor_clear", True, "clear")], [], [], [],
         ) for c in candidates]

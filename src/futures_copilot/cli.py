@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .config import Config, load_config
@@ -134,7 +135,8 @@ def cmd_scan(config: Config, args) -> int:
         result = scan(store, config, args.symbol, as_of_ts=args.as_of,
                       persist=not args.no_persist)
         gate = evaluate(result.state, result.candidates, store, config,
-                        persist=not args.no_persist)
+                        persist=not args.no_persist,
+                        now_ts=(result.state.as_of_close_ts if args.as_of is not None else time.time()))
         if args.json:
             out = result.to_dict()
             out["gate"] = {
@@ -384,14 +386,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--symbol", default="MNQ")
     p.add_argument("--day", default=None, help="trading day YYYY-MM-DD (default: today's)")
 
-    p = sub.add_parser("backtest", help="offline deterministic Golden Hour historical replay")
+    backtest_help = (
+        "offline deterministic Golden Hour historical replay; requires an existing DB "
+        "(run `copilot init-db` and `copilot backfill` first)"
+    )
+    p = sub.add_parser("backtest", help=backtest_help, description=backtest_help)
     p.add_argument("--symbol", default="MNQ")
     p.add_argument("--start", required=True,
                    help="ET start boundary: YYYY-MM-DD or ISO datetime (inclusive)")
     p.add_argument("--end", required=True,
                    help="ET end boundary: YYYY-MM-DD includes the full day; datetime is exclusive")
 
-    p = sub.add_parser("review", help="deterministic journal performance synthesis")
+    review_help = (
+        "deterministic journal performance synthesis; requires an existing DB "
+        "(run `copilot init-db` and `copilot backfill` first)"
+    )
+    p = sub.add_parser("review", help=review_help, description=review_help)
     p.add_argument("--weekly", action="store_true", required=True,
                    help="write the preceding seven trading days to the Obsidian vault")
     p.add_argument("--as-of", default=None, help="report date YYYY-MM-DD (default: today ET)")

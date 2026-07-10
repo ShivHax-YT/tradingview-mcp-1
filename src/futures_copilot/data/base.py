@@ -33,5 +33,13 @@ class CandleSource(ABC):
     def health_check(self) -> dict:
         """Return a dict describing source health; raise DataSourceError if unusable."""
 
+    def assert_live_freshness(self, symbol: str, timeframe: str) -> None:
+        """Fail closed when a live-only source observation is stale.
+
+        Historical/fixture adapters may keep the no-op default. Product live
+        adapters override this using source timestamps observed by the latest
+        ``get_candles`` call.
+        """
+
     def close(self) -> None:  # pragma: no cover - optional
         pass
